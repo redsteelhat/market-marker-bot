@@ -154,7 +154,7 @@ class Quote(BaseModel):
     @property
     def spread_bps(self) -> Decimal:
         """Calculate spread in basis points."""
-        if self.mid_price > 0:
+        if self.mid_price and self.mid_price > 0:
             return (self.spread / self.mid_price) * Decimal("10000")
         return Decimal("0")
 
