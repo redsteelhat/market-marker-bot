@@ -37,6 +37,12 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
+## Documentation
+
+- [Specification & Strategy Framework](docs/SPEC.md) - Hedef metrikler, işlem frekansı, sermaye planı, borsa seçimi
+- [Strategy Design (FAZ 2)](docs/STRATEGY_DESIGN.md) - Strateji tasarım sözleşmesi (V1 PMM, V2 AS), parametreler, risk kuralları, PnL modelleri
+- [Architecture & Development Order](docs/ARCHITECTURE.md) - Mimari tasarım, modül yapısı, geliştirme sırası, veri akışı
+
 ## Branch Strategy
 
 - `main`: Production-ready code
