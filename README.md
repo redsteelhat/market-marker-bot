@@ -42,6 +42,7 @@ cp .env.example .env
 - [Specification & Strategy Framework](docs/SPEC.md) - Hedef metrikler, işlem frekansı, sermaye planı, borsa seçimi
 - [Strategy Design (FAZ 2)](docs/STRATEGY_DESIGN.md) - Strateji tasarım sözleşmesi (V1 PMM, V2 AS), parametreler, risk kuralları, PnL modelleri
 - [Architecture & Development Order](docs/ARCHITECTURE.md) - Mimari tasarım, modül yapısı, geliştirme sırası, veri akışı
+- [Development Phases (FAZ 3-6)](docs/DEVELOPMENT_PHASES.md) - Sistem mimarisi, strateji motoru, risk katmanı, backtest altyapısı
 
 ## Branch Strategy
 
