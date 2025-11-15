@@ -37,6 +37,51 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
+3. Configure your `.env` file with Binance API credentials:
+```env
+EXCHANGE_API_KEY=your_api_key_here
+EXCHANGE_API_SECRET=your_api_secret_here
+EXCHANGE_BASE_URL=https://fapi.binance.com  # or https://testnet.binancefuture.com for testnet
+EXCHANGE_WS_URL=wss://fstream.binance.com  # or wss://stream.binancefuture.com for testnet
+EXCHANGE_TESTNET=true  # Set to false for production
+```
+
+## Usage
+
+### Run the bot:
+```bash
+python -m src.apps.main run
+```
+
+### Run in dry-run mode (no real orders):
+```bash
+python -m src.apps.main run --dry-run
+```
+
+### Check bot status:
+```bash
+python -m src.apps.main status
+```
+
+### Run with specific symbol:
+```bash
+python -m src.apps.main run --symbol BTCUSDT
+```
+
+## Testing
+
+### Run unit tests:
+```bash
+pytest tests/ -v
+```
+
+### Run integration tests (requires testnet API credentials):
+```bash
+pytest -m integration -v
+```
+
+**Note:** Integration tests require real Binance testnet API credentials and will make actual API calls.
+
 ## Documentation
 
 - [Specification & Strategy Framework](docs/SPEC.md) - Hedef metrikler, işlem frekansı, sermaye planı, borsa seçimi
