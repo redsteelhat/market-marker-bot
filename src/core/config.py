@@ -5,7 +5,7 @@ and provides type-safe configuration objects.
 """
 
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -108,23 +108,59 @@ class Settings(BaseSettings):
     bot_equity_usdt: float = Field(200.0, description="Bot equity in USDT")
 
     # Exchange configuration (loaded from env vars)
-    exchange_api_key: str = Field("", description="Exchange API key")
-    exchange_api_secret: str = Field("", description="Exchange API secret")
+    # Support both old format and new BINANCE_FUTURES_* format
+    exchange_api_key: str = Field("", description="Exchange API key (BINANCE_FUTURES_API_KEY_*)")
+    exchange_api_secret: str = Field("", description="Exchange API secret (BINANCE_FUTURES_API_SECRET_*)")
     exchange_api_passphrase: Optional[str] = Field(None, description="Exchange API passphrase")
-    exchange_base_url: str = Field("https://fapi.binance.com", description="Exchange base URL")
-    exchange_ws_url: Optional[str] = Field("wss://fstream.binance.com", description="WebSocket URL")
-    exchange_testnet: bool = Field(False, description="Use testnet environment")
+    exchange_base_url: str = Field("https://fapi.binance.com", description="Exchange base URL (BINANCE_FUTURES_*_BASE_URL)")
+    exchange_ws_url: Optional[str] = Field("wss://fstream.binance.com", description="WebSocket URL (BINANCE_FUTURES_WS_*)")
+    exchange_testnet: bool = Field(False, description="Use testnet environment (BINANCE_FUTURES_USE_TESTNET)")
+    
+    # New format env vars (will be mapped in property)
+    binance_futures_use_testnet: bool = Field(False, description="Use Binance Futures testnet")
+    binance_futures_api_key_testnet: str = Field("", description="Binance Futures testnet API key")
+    binance_futures_api_secret_testnet: str = Field("", description="Binance Futures testnet API secret")
+    binance_futures_api_key_mainnet: str = Field("", description="Binance Futures mainnet API key")
+    binance_futures_api_secret_mainnet: str = Field("", description="Binance Futures mainnet API secret")
+    binance_futures_mainnet_base_url: str = Field("https://fapi.binance.com", description="Binance Futures mainnet base URL")
+    binance_futures_testnet_base_url: str = Field("https://demo-fapi.binance.com", description="Binance Futures testnet base URL")
+    binance_futures_ws_market_mainnet: str = Field("wss://fstream.binance.com", description="Binance Futures mainnet WS market URL")
+    binance_futures_ws_market_testnet: str = Field("wss://fstream.binancefuture.com", description="Binance Futures testnet WS market URL")
+    
+    # Trading mode
+    trading_mode: str = Field("paper", description="Trading mode: live|paper|dry-run|backtest")
+    
+    # Default symbols
+    default_symbols: str = Field("BTCUSDT,ETHUSDT", description="Default symbols (comma-separated)")
 
     @property
     def exchange(self) -> ExchangeConfig:
-        """Get exchange configuration."""
+        """Get exchange configuration.
+        
+        Supports both old format (exchange_*) and new format (BINANCE_FUTURES_*).
+        New format takes precedence.
+        """
+        # Use new format if available, otherwise fall back to old format
+        use_testnet = self.binance_futures_use_testnet if self.binance_futures_use_testnet else self.exchange_testnet
+        
+        if use_testnet:
+            api_key = self.binance_futures_api_key_testnet or self.exchange_api_key
+            api_secret = self.binance_futures_api_secret_testnet or self.exchange_api_secret
+            base_url = self.binance_futures_testnet_base_url or self.exchange_base_url
+            ws_url = self.binance_futures_ws_market_testnet or self.exchange_ws_url
+        else:
+            api_key = self.binance_futures_api_key_mainnet or self.exchange_api_key
+            api_secret = self.binance_futures_api_secret_mainnet or self.exchange_api_secret
+            base_url = self.binance_futures_mainnet_base_url or self.exchange_base_url
+            ws_url = self.binance_futures_ws_market_mainnet or self.exchange_ws_url
+        
         return ExchangeConfig(
-            api_key=self.exchange_api_key,
-            api_secret=self.exchange_api_secret,
+            api_key=api_key,
+            api_secret=api_secret,
             api_passphrase=self.exchange_api_passphrase,
-            base_url=self.exchange_base_url,
-            ws_url=self.exchange_ws_url,
-            testnet=self.exchange_testnet,
+            base_url=base_url,
+            ws_url=ws_url,
+            testnet=use_testnet,
         )
 
     # Strategy configuration
@@ -133,8 +169,22 @@ class Settings(BaseSettings):
     # Risk configuration
     risk: RiskConfig = Field(default_factory=RiskConfig)
 
-    # Trading symbols
+    # Trading symbols (from DEFAULT_SYMBOLS env var or default)
     symbols: list[str] = Field(default_factory=lambda: ["BTCUSDT", "ETHUSDT"])
+    
+    @field_validator("symbols", mode="before")
+    @classmethod
+    def parse_symbols(cls, v):
+        """Parse symbols from string or list."""
+        if isinstance(v, str):
+            return [s.strip() for s in v.split(",") if s.strip()]
+        return v
+    
+    @field_validator("default_symbols", mode="after")
+    @classmethod
+    def set_symbols_from_default(cls, v):
+        """Return default_symbols value."""
+        return v
 
     # Logging
     log_level: str = Field("INFO", description="Logging level")
@@ -143,5 +193,9 @@ class Settings(BaseSettings):
     @classmethod
     def from_env(cls) -> "Settings":
         """Load settings from environment variables."""
-        return cls()
+        settings = cls()
+        # Parse DEFAULT_SYMBOLS if provided and symbols not explicitly set
+        if settings.default_symbols and (not settings.symbols or settings.symbols == ["BTCUSDT", "ETHUSDT"]):
+            settings.symbols = [s.strip() for s in settings.default_symbols.split(",") if s.strip()]
+        return settings
 
