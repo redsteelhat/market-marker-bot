@@ -1,0 +1,17 @@
+# Python 3.11+ required
+
+# HTTP Client
+httpx>=0.25.0
+
+# WebSocket
+websockets>=12.0
+
+# Data Processing
+pandas>=2.1.0
+numpy>=1.26.0
+
+# Configuration
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+python-dotenv>=1.0.0
+
