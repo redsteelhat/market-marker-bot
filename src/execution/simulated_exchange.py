@@ -185,16 +185,18 @@ class SimulatedExchangeClient(IExchangeClient):
             symbol: Trading symbol
             snapshot: Current order book snapshot
         """
-        if symbol not in self.open_orders:
+        if symbol not in self.open_orders or not self.open_orders[symbol]:
             return
 
         if not snapshot.best_bid or not snapshot.best_ask:
+            logger.debug(f"No best bid/ask for {symbol}, skipping order matching")
             return
 
         best_bid = snapshot.best_bid
         best_ask = snapshot.best_ask
 
         new_open_orders = []
+        fills_count = 0
 
         for order in self.open_orders[symbol]:
             if not order.is_open:
@@ -209,16 +211,22 @@ class SimulatedExchangeClient(IExchangeClient):
             if order.side == OrderSide.BUY and order.price and order.price >= best_ask:
                 fill_price = best_ask
                 filled = True
+                logger.info(f"BUY order {order.order_id} filled: {order.price} >= {best_ask}")
             elif order.side == OrderSide.SELL and order.price and order.price <= best_bid:
                 fill_price = best_bid
                 filled = True
+                logger.info(f"SELL order {order.order_id} filled: {order.price} <= {best_bid}")
 
             if filled and fill_price:
                 await self._apply_fill(order, fill_price, snapshot)
+                fills_count += 1
             else:
                 new_open_orders.append(order)
 
         self.open_orders[symbol] = new_open_orders
+        
+        if fills_count > 0:
+            logger.info(f"Matched {fills_count} order(s) for {symbol}")
 
     async def _apply_fill(self, order: Order, fill_price: Decimal, snapshot: OrderBookSnapshot) -> None:
         """Apply a fill to an order and update position.

@@ -50,10 +50,17 @@ class BinanceWebSocketClient:
         """Connect to WebSocket stream.
 
         Args:
-            stream: Stream name (e.g., 'btcusdt@depth20@100ms')
+            stream: Stream name (e.g., 'btcusdt@depth20@100ms' or 'btcusdt@depth20@100ms/ethusdt@depth20@100ms' for multi-stream)
         """
         self.current_stream = stream
-        url = f"{self.ws_url}/ws/{stream}"
+        # Binance multi-stream format: /stream?streams=stream1/stream2
+        # Single stream format: /ws/stream1
+        if "/" in stream:
+            # Multi-stream
+            url = f"{self.ws_url}/stream?streams={stream}"
+        else:
+            # Single stream
+            url = f"{self.ws_url}/ws/{stream}"
         logger.info(f"Connecting to WebSocket: {url}")
 
         try:
@@ -91,7 +98,11 @@ class BinanceWebSocketClient:
                     # Try to reconnect
                     if self.current_stream:
                         try:
-                            url = f"{self.ws_url}/ws/{self.current_stream}"
+                            # Use same format as connect
+                            if "/" in self.current_stream:
+                                url = f"{self.ws_url}/stream?streams={self.current_stream}"
+                            else:
+                                url = f"{self.ws_url}/ws/{self.current_stream}"
                             self.ws = await websockets.connect(url, ping_interval=20, ping_timeout=10)
                             logger.info("WebSocket reconnected successfully")
                             reconnect_attempts = 0
@@ -104,6 +115,7 @@ class BinanceWebSocketClient:
                     message = await asyncio.wait_for(self.ws.recv(), timeout=60.0)
                     reconnect_attempts = 0  # Reset on successful message
                     data = json.loads(message)
+                    logger.debug(f"WebSocket message received: {list(data.keys()) if isinstance(data, dict) else 'non-dict'}")
                     if self.on_message:
                         self.on_message(data)
                 except asyncio.TimeoutError:

@@ -113,6 +113,7 @@ pytest -m integration -v
 - [Architecture & Development Order](docs/ARCHITECTURE.md) - Mimari tasarım, modül yapısı, geliştirme sırası, veri akışı
 - [Development Phases (FAZ 3-6)](docs/DEVELOPMENT_PHASES.md) - Sistem mimarisi, strateji motoru, risk katmanı, backtest altyapısı
 - [Testing Guide](docs/TESTING_GUIDE.md) - Sistematik test ve kalibrasyon rehberi
+- [Order Size Fix](docs/ORDER_SIZE_FIX.md) - Order size limit sorunu ve çözümü
 
 ## Branch Strategy
 

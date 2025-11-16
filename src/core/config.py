@@ -41,9 +41,9 @@ class StrategyConfig(BaseModel):
     inventory_skew_strength: float = Field(1.2, description="Inventory skew strength (1.0-1.5)")
 
     # Order size parameters
-    order_notional_pct: float = Field(0.0075, description="Order notional as % of bot equity (0.5-1.0%)")
-    min_order_notional: float = Field(10.0, description="Minimum order notional in USDT")
-    max_order_notional_pct: float = Field(0.025, description="Max order notional as % of bot equity (2-3%)")
+    order_notional_pct: float = Field(0.01, description="Order notional as % of bot equity (1.0%)")
+    min_order_notional: float = Field(2.0, description="Minimum order notional in USDT")
+    max_order_notional_pct: float = Field(0.03, description="Max order notional as % of bot equity (3%)")
     dynamic_size_by_vol: bool = Field(True, description="Adjust order size by volatility")
 
     # Quote refresh parameters

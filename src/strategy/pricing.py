@@ -181,6 +181,10 @@ class PricingEngine:
         min_notional = Decimal(str(self.config.min_order_notional))
         max_notional = bot_equity * Decimal(str(self.config.max_order_notional_pct))
 
+        # Ensure min_notional doesn't exceed max_notional
+        if min_notional > max_notional:
+            min_notional = max_notional * Decimal("0.5")  # Fallback: use 50% of max
+
         if notional < min_notional:
             notional = min_notional
         elif notional > max_notional:
@@ -188,5 +192,9 @@ class PricingEngine:
 
         # Calculate size
         size = notional / price
+        
+        # Round to reasonable precision (8 decimal places for BTC)
+        size = size.quantize(Decimal("0.00000001"))
+        
         return size
 

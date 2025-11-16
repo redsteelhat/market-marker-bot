@@ -50,19 +50,30 @@ class OrderManager:
             Order object
         """
         try:
-            response = await self.client.place_limit_order(
+            # Create Order object
+            from src.core.models import OrderType
+            
+            order = Order(
+                order_id=None,  # Will be assigned by exchange
+                client_order_id=client_order_id,
                 symbol=symbol,
                 side=side,
-                quantity=float(quantity),
-                price=float(price),
-                client_order_id=client_order_id,
+                order_type=OrderType.LIMIT,
+                quantity=quantity,
+                price=price,
+                status=OrderStatus.NEW,
+                timestamp=datetime.utcnow(),
             )
+            
+            # Submit via IExchangeClient interface
+            submitted_order = await self.client.submit_order(order)
+            
+            # Store in open orders
+            if submitted_order.order_id:
+                self.open_orders[submitted_order.order_id] = submitted_order
+            logger.info(f"Order submitted: {submitted_order.order_id or 'pending'} {side.value} {quantity} @ {price}")
 
-            order = self._parse_order_response(response)
-            self.open_orders[order.order_id] = order
-            logger.info(f"Order submitted: {order.order_id} {side.value} {quantity} @ {price}")
-
-            return order
+            return submitted_order
         except Exception as e:
             logger.error(f"Error submitting order: {e}")
             raise
@@ -82,10 +93,14 @@ class OrderManager:
                 logger.warning(f"Order not found: {order_id}")
                 return False
 
-            response = await self.client.cancel_order(
-                symbol=order.symbol,
+            success = await self.client.cancel_order(
                 order_id=order_id,
+                symbol=order.symbol,
             )
+            
+            if not success:
+                logger.warning(f"Cancel order returned False for {order_id}")
+                return False
 
             # Update order status
             order.status = OrderStatus.CANCELED

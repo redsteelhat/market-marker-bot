@@ -73,7 +73,7 @@ def test_pricing_engine_order_size(strategy_config):
 
     size = engine.calculate_order_size(Decimal("50000"), bot_equity)
     assert size > 0
-    assert size * Decimal("50000") >= Decimal("10")  # Min notional
+    assert size * Decimal("50000") >= Decimal("2.0")  # Min notional (updated to 2.0)
 
 
 def test_pricing_engine_spread_limits(strategy_config, orderbook):

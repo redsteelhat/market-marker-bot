@@ -23,6 +23,7 @@ from src.execution.order_manager import OrderManager
 from src.risk.guardian import RiskGuardian
 from src.strategy.market_maker import MarketMaker
 from src.monitoring.metrics import MetricsCollector, collect_snapshot
+from src.monitoring.alerts import AlertManager, AlertThresholds
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -71,6 +72,8 @@ async def run_paper_trading(settings: Settings):
         
         # Create metrics collector
         metrics_collector = MetricsCollector(Decimal(str(settings.bot_equity_usdt)))
+        # Create alert manager for post-trade checks
+        alert_manager = AlertManager(AlertThresholds())
 
         # Create market makers
         market_makers = []
@@ -100,14 +103,40 @@ async def run_paper_trading(settings: Settings):
         # Subscribe to WebSocket streams
         console.print("[cyan]Subscribing to WebSocket streams...[/cyan]")
         streams = [f"{symbol.lower()}@depth20@100ms" for symbol in settings.symbols]
+        # Binance multi-stream format: stream1/stream2 (no /ws/ prefix, handled in connect)
         stream_name = "/".join(streams)
+        logger.info(f"Subscribing to streams: {stream_name}")
 
         def on_message(data: dict):
             """Handle WebSocket message."""
-            if "stream" in data and "data" in data:
-                stream = data["stream"]
-                symbol = stream.split("@")[0].upper() + "USDT"
-                ob_data = data["data"]
+            try:
+                # Binance WebSocket format for multi-stream: {"stream": "btcusdt@depth20@100ms", "data": {...}}
+                # Single stream format: direct data dict
+                if "stream" in data and "data" in data:
+                    # Multi-stream format
+                    stream = data["stream"]
+                    ob_data = data["data"]
+                elif "e" in data and data.get("e") == "depthUpdate":
+                    # Single stream format (direct depthUpdate event)
+                    stream = None  # Will extract from symbol
+                    ob_data = data
+                else:
+                    logger.warning(f"Unknown WebSocket message format: {list(data.keys())}")
+                    return
+
+                # Extract symbol from stream name or data
+                if stream:
+                    # Extract symbol: "btcusdt@depth20@100ms" -> "BTCUSDT"
+                    symbol_part = stream.split("@")[0].upper()
+                    symbol = symbol_part
+                elif "s" in ob_data:
+                    # Extract from data
+                    symbol = ob_data["s"]
+                else:
+                    logger.warning(f"Cannot extract symbol from message: {list(ob_data.keys())}")
+                    return
+
+                logger.debug(f"WebSocket update received for {symbol}")
 
                 # Update order book
                 if symbol in orderbook_managers:
@@ -116,13 +145,19 @@ async def run_paper_trading(settings: Settings):
                     snapshot = ob_manager.snapshot
 
                     if snapshot:
-                        # Feed to simulated exchange
+                        logger.debug(f"Order book updated for {symbol}: bid={snapshot.best_bid}, ask={snapshot.best_ask}")
+                        
+                        # Feed to simulated exchange for order matching
                         asyncio.create_task(simulated_exchange.on_orderbook_update(symbol, snapshot))
 
                         # Trigger market maker update
                         for mm in market_makers:
                             if mm.symbol == symbol:
                                 asyncio.create_task(mm.on_order_book_update(snapshot))
+                else:
+                    logger.warning(f"Symbol {symbol} not found in orderbook_managers. Available: {list(orderbook_managers.keys())}")
+            except Exception as e:
+                logger.error(f"Error handling WebSocket message: {e}", exc_info=True)
 
         ws_client = BinanceWebSocketClient(
             ws_url="wss://stream.binance.com:9443",
@@ -142,10 +177,41 @@ async def run_paper_trading(settings: Settings):
         # Keep running
         last_status_print = datetime.utcnow()
         status_interval = timedelta(minutes=5)  # Print status every 5 minutes
+        last_debug_log = datetime.utcnow()
+        debug_interval = timedelta(seconds=10)  # Debug log every 10 seconds (for testing)
         
         try:
             while True:
                 await asyncio.sleep(1)
+                
+                # Debug logging every 30 seconds
+                now = datetime.utcnow()
+                if now - last_debug_log >= debug_interval:
+                    try:
+                        positions = await simulated_exchange.get_positions()
+                        open_orders = await simulated_exchange.get_open_orders()
+                        # get_open_orders returns List[Order]
+                        total_orders = len(open_orders) if isinstance(open_orders, list) else 0
+                        
+                        console.print(f"\n[cyan]Status Update ({now.strftime('%H:%M:%S')}):[/cyan]")
+                        console.print(f"  Open Orders: {total_orders}")
+                        console.print(f"  Positions: {len(positions)}")
+                        for symbol in settings.symbols:
+                            if symbol in orderbook_managers:
+                                ob = orderbook_managers[symbol]
+                                if ob.snapshot:
+                                    # Get open orders for this symbol
+                                    symbol_orders = [o for o in open_orders if o.symbol == symbol] if isinstance(open_orders, list) else []
+                                    console.print(f"  {symbol}: Bid={ob.snapshot.best_bid}, Ask={ob.snapshot.best_ask}, Mid={ob.snapshot.mid_price}, Open Orders={len(symbol_orders)}")
+                                    if symbol_orders:
+                                        for order in symbol_orders[:2]:  # Show first 2 orders
+                                            console.print(f"    {order.side.value} {order.quantity} @ {order.price}")
+                        if positions:
+                            for pos in positions:
+                                console.print(f"  Position {pos.symbol}: {pos.quantity:.6f} @ {pos.entry_price} (PnL: {pos.unrealized_pnl:+.2f} USDT)")
+                    except Exception as e:
+                        logger.error(f"Error in debug logging: {e}")
+                    last_debug_log = now
 
                 # Check kill switch
                 if risk_guardian.is_kill_switch_active():
@@ -171,6 +237,12 @@ async def run_paper_trading(settings: Settings):
                             initial_equity=Decimal(str(settings.bot_equity_usdt)),
                             metrics_collector=metrics_collector,
                         )
+
+                        # Post-trade checks & alerts
+                        try:
+                            alert_manager.evaluate(snapshot)
+                        except Exception as e:
+                            logger.error(f"Alert evaluation error: {e}")
                         
                         console.print(f"\n[bold cyan]Status Update ({now.strftime('%H:%M:%S')}):[/bold cyan]")
                         console.print(f"  Equity: {snapshot.equity:.2f} USDT | PnL: {snapshot.total_pnl:+.2f} USDT")

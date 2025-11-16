@@ -5,6 +5,7 @@ This module implements the main market making logic with event-driven loop.
 
 import asyncio
 import logging
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Callable, Optional
 from src.core.models import Order, OrderBookSnapshot, Position, Quote
@@ -56,6 +57,10 @@ class MarketMaker:
         self.current_position: Optional[Position] = None
         self.current_quote: Optional[Quote] = None
         self.open_orders: dict[str, Order] = {}  # client_order_id -> Order
+        
+        # Log throttling for risk warnings
+        self._last_risk_warning_at: dict[str, datetime] = {}
+        self._risk_warning_throttle_seconds = 10
 
     async def start(self) -> None:
         """Start market maker."""
@@ -122,10 +127,17 @@ class MarketMaker:
     async def _quote_loop(self) -> None:
         """Periodic quote update loop."""
         refresh_interval = self.settings.strategy.refresh_interval_ms / 1000.0
+        loop_count = 0
 
         while self.running:
             try:
                 await asyncio.sleep(refresh_interval)
+                loop_count += 1
+                
+                # Log every 10 loops (every ~10 seconds)
+                if loop_count % 10 == 0:
+                    logger.info(f"Quote loop running for {self.symbol} (loop #{loop_count})")
+                
                 await self._update_quotes()
             except asyncio.CancelledError:
                 break
@@ -145,7 +157,7 @@ class MarketMaker:
         # Get current order book
         snapshot = self.orderbook_manager.snapshot
         if not snapshot or not snapshot.mid_price:
-            logger.warning("No order book snapshot available")
+            logger.debug(f"No order book snapshot available for {self.symbol}")
             return
 
         # Get current inventory
@@ -157,6 +169,7 @@ class MarketMaker:
         # Compute new quote
         try:
             quote = self.pricing_engine.compute_quote(snapshot, inventory_qty, volatility_estimate)
+            logger.debug(f"Computed quote for {self.symbol}: bid={quote.bid_price}, ask={quote.ask_price}, mid={snapshot.mid_price}")
         except Exception as e:
             logger.error(f"Error computing quote: {e}")
             return
@@ -182,8 +195,16 @@ class MarketMaker:
         """
         # Get current open orders
         open_orders = self.order_manager.get_open_orders(self.symbol)
+        
+        # Calculate price change threshold (0.1% of mid price for BTC/ETH scale)
+        snapshot = self.orderbook_manager.snapshot
+        if snapshot and snapshot.mid_price:
+            price_threshold = snapshot.mid_price * Decimal("0.001")  # 0.1% of mid
+        else:
+            price_threshold = Decimal("1.0")  # Fallback
 
         # Cancel orders that are no longer needed or have wrong prices
+        cancelled_count = 0
         for order in open_orders:
             should_cancel = False
 
@@ -192,14 +213,18 @@ class MarketMaker:
             elif order.side.value == "SELL" and not should_quote_ask:
                 should_cancel = True
             elif order.price:
-                # Check if price changed significantly
-                if order.side.value == "BUY" and abs(order.price - quote.bid_price) > Decimal("0.01"):
+                # Check if price changed significantly (use dynamic threshold)
+                if order.side.value == "BUY" and abs(order.price - quote.bid_price) > price_threshold:
                     should_cancel = True
-                elif order.side.value == "SELL" and abs(order.price - quote.ask_price) > Decimal("0.01"):
+                elif order.side.value == "SELL" and abs(order.price - quote.ask_price) > price_threshold:
                     should_cancel = True
 
             if should_cancel and order.order_id:
                 await self.order_manager.cancel_order(order.order_id)
+                cancelled_count += 1
+
+        if cancelled_count > 0:
+            logger.debug(f"Cancelled {cancelled_count} order(s) for {self.symbol}")
 
         # Submit new orders if needed
         if should_quote_bid:
@@ -213,10 +238,18 @@ class MarketMaker:
         Args:
             quote: Quote with bid price and size
         """
+        # Calculate price tolerance (0.1% of mid price)
+        snapshot = self.orderbook_manager.snapshot
+        if snapshot and snapshot.mid_price:
+            price_tolerance = snapshot.mid_price * Decimal("0.001")  # 0.1% of mid
+        else:
+            price_tolerance = Decimal("1.0")  # Fallback
+        
         # Check if we already have a bid order at this price
         open_orders = self.order_manager.get_open_orders(self.symbol)
         for order in open_orders:
-            if order.side.value == "BUY" and order.price and abs(order.price - quote.bid_price) < Decimal("0.01"):
+            if order.side.value == "BUY" and order.price and abs(order.price - quote.bid_price) < price_tolerance:
+                logger.debug(f"Already have BUY order at {quote.bid_price} for {self.symbol}, skipping")
                 return  # Already have order at this price
 
         # Calculate order size
@@ -248,7 +281,7 @@ class MarketMaker:
             )
 
             if not is_allowed:
-                logger.warning(f"Bid order rejected by risk guardian: {reason}")
+                self._log_risk_warning("bid-order-rejected", f"Bid order rejected by risk guardian: {reason}")
                 return
 
         # Submit order
@@ -269,10 +302,18 @@ class MarketMaker:
         Args:
             quote: Quote with ask price and size
         """
+        # Calculate price tolerance (0.1% of mid price)
+        snapshot = self.orderbook_manager.snapshot
+        if snapshot and snapshot.mid_price:
+            price_tolerance = snapshot.mid_price * Decimal("0.001")  # 0.1% of mid
+        else:
+            price_tolerance = Decimal("1.0")  # Fallback
+        
         # Check if we already have an ask order at this price
         open_orders = self.order_manager.get_open_orders(self.symbol)
         for order in open_orders:
-            if order.side.value == "SELL" and order.price and abs(order.price - quote.ask_price) < Decimal("0.01"):
+            if order.side.value == "SELL" and order.price and abs(order.price - quote.ask_price) < price_tolerance:
+                logger.debug(f"Already have SELL order at {quote.ask_price} for {self.symbol}, skipping")
                 return  # Already have order at this price
 
         # Calculate order size
@@ -304,7 +345,7 @@ class MarketMaker:
             )
 
             if not is_allowed:
-                logger.warning(f"Ask order rejected by risk guardian: {reason}")
+                self._log_risk_warning("ask-order-rejected", f"Ask order rejected by risk guardian: {reason}")
                 return
 
         # Submit order
@@ -318,6 +359,20 @@ class MarketMaker:
             logger.info(f"Ask order submitted: {submitted_order.order_id} @ {quote.ask_price}")
         except Exception as e:
             logger.error(f"Error submitting ask order: {e}")
+
+    def _log_risk_warning(self, key: str, message: str) -> None:
+        """Log risk warning with throttling to avoid spam.
+
+        Args:
+            key: Unique key for this warning type
+            message: Warning message
+        """
+        now = datetime.utcnow()
+        last = self._last_risk_warning_at.get(key)
+        
+        if not last or (now - last) > timedelta(seconds=self._risk_warning_throttle_seconds):
+            logger.warning(message)
+            self._last_risk_warning_at[key] = now
 
     def _should_requote_immediately(self, snapshot: OrderBookSnapshot) -> bool:
         """Check if we should re-quote immediately based on price change.

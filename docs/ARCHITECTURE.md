@@ -99,27 +99,46 @@ Apps (CLI / Runner Scripts)
 
 ### 3.2 Data
 
+**`exchange.py`**
+- `IExchangeClient` interface - Exchange client'lar için abstract base class
+  - `get_orderbook`, `submit_order`, `cancel_order`, `get_open_orders`, `get_positions`, `get_trades`
+  - Gerçek exchange (Binance) ve simulated exchange için ortak interface
+
 **`binance_client.py`**
 - HTTP istek wrapper'ı (REST):
-  - `get_orderbook`, `get_ticker`, `get_positions`, `get_open_orders`, `place_order`, `cancel_order` vb.
+  - `get_orderbook`, `get_ticker`, `get_positions`, `get_open_orders`, `submit_order`, `cancel_order` vb.
+  - `IExchangeClient` interface'ini implement eder
+
+**`binance_public_client.py`**
+- Public API client (KYC gerektirmez):
+  - Sadece `get_orderbook` için kullanılır
+  - Paper trading modunda canlı market data için kullanılır
 
 **`websocket.py`**
 - Public stream (order book, trades) + private stream (fills, order updates)
+- Reconnect mekanizması ve error handling
 
 **`orderbook.py`**
 - L1/L2 snapshot modeli, mid, spread hesaplama, basit update mekanizması
 
 ---
 
-### 3.3 Execution (Skeleton)
+### 3.3 Execution
 
 **`order_manager.py`**
-- `submit_order(order: Order)`
-- `cancel_order(order_id)`
-- `sync_open_orders()`
+- `submit_order(order: Order)` - `IExchangeClient` interface üzerinden emir gönderir
+- `cancel_order(order_id)` - Emir iptal
+- `sync_open_orders()` - Açık emirleri senkronize et
 
 **`routing.py`**
 - Hangi markete / hangi client'a gönderileceğini belirleyen basit router
+
+**`simulated_exchange.py`**
+- `SimulatedExchangeClient` - Paper trading için lokal exchange simülasyonu
+  - Order matching mantığı
+  - Position ve PnL tracking
+  - `IExchangeClient` interface'ini implement eder
+  - Live Paper Exchange modunda kullanılır
 
 ---
 
@@ -186,7 +205,57 @@ Apps (CLI / Runner Scripts)
 
 ## 4. Veri Akışı
 
-### Normal İşlem Akışı
+### High-level Diagram (Mermaid)
+
+```mermaid
+flowchart TD
+    subgraph Apps
+        A[CLI Runner main.py]
+        P[Paper Trading Orchestrator]
+    end
+
+    subgraph Data
+        BPC[BinancePublicClient]
+        WS[WebSocket Client]
+        OBM[OrderBookManager]
+    end
+
+    subgraph Execution
+        SEC[SimulatedExchangeClient]
+        OM[OrderManager]
+    end
+
+    subgraph Strategy
+        MM[MarketMaker]
+        PR[PricingEngine]
+        INV[InventoryManager]
+    end
+
+    subgraph Risk
+        RG[RiskGuardian]
+    end
+
+    subgraph Monitoring
+        MC[MetricsCollector]
+        AM[AlertManager]
+    end
+
+    A --> P
+    P --> BPC
+    P --> WS
+    WS --> OBM
+    BPC --> OBM
+    OBM --> MM
+    MM --> PR
+    MM --> INV
+    MM --> RG
+    MM --> OM
+    OM --> SEC
+    SEC --> MC
+    MC --> AM
+```
+
+### Normal İşlem Akışı (Live Trading)
 
 ```
 Order Book Update (Data)
@@ -205,7 +274,29 @@ Execution.order_manager.submit_order()
   ↓
 Execution.routing.route_to_exchange()
   ↓
-Data.binance_client.place_order()
+Data.binance_client.submit_order() (IExchangeClient)
+```
+
+### Paper Trading Akışı (Live Data + Local Simulation)
+
+```
+Binance Public API (Order Book)
+  ↓
+BinancePublicClient.get_orderbook()
+  ↓
+WebSocket Stream (Live Market Data)
+  ↓
+SimulatedExchangeClient.on_orderbook_update()
+  ↓
+Strategy.pricing.compute_quotes()
+  ↓
+Risk.guardian.check_order_limits()
+  ↓
+SimulatedExchangeClient.submit_order() (Lokal)
+  ↓
+SimulatedExchangeClient._match_orders() (Fill Simulation)
+  ↓
+Position & PnL Update (Lokal)
 ```
 
 ### Risk Event Akışı
@@ -238,13 +329,20 @@ Backtest
 
 **Bağımlılık Kuralları:**
 - Core: Hiçbir modüle bağımlı değil
+  - `IExchangeClient` interface'i Core'da tanımlı (exchange abstraction)
 - Data: Sadece Core'a bağımlı
+  - `BinanceClient`, `BinancePublicClient` → `IExchangeClient` implement eder
 - Execution: Core + Data'ya bağımlı
+  - `SimulatedExchangeClient` → `IExchangeClient` implement eder
+  - `OrderManager` → `IExchangeClient` kullanır (exchange-agnostic)
 - Risk: Core + Data + Execution (interface) bağımlı
 - Strategy: Core + Data + Risk + Execution bağımlı
+  - `MarketMaker` → `IExchangeClient` kullanır (exchange-agnostic)
 - Monitoring: Core + Data + Risk + Strategy bağımlı
 - Backtest: Core + Data + Strategy bağımlı
+  - `BacktestEngine` → `SimulatedExchangeClient` kullanır
 - Apps: Tüm modüllere bağımlı
+  - `paper_trading.py` → `BinancePublicClient` + `SimulatedExchangeClient` kombinasyonu
 
 ---
 

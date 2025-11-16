@@ -16,29 +16,29 @@ Bu doküman, market maker botunun geliştirme yol haritasını özetler.
 - [x] Risk kuralları tanımlama
 - [x] PnL & TCA çerçevesi
 
-### 🔄 FAZ 3: Sistem Mimarisi ve Temel Altyapı
-- [ ] High-level mimari diagram
-- [ ] Market data client (WebSocket)
-- [ ] Execution client (REST/WebSocket)
-- [ ] Konfigürasyon yönetimi
+### ✅ FAZ 3: Sistem Mimarisi ve Temel Altyapı
+- [x] High-level mimari diagram (ARCHITECTURE.md'de dokümante edildi)
+- [x] Market data client (WebSocket) - `src/data/websocket.py`, `src/data/binance_public_client.py`
+- [x] Execution client (REST/WebSocket) - `src/data/binance_client.py`, `IExchangeClient` interface
+- [x] Konfigürasyon yönetimi - `src/core/config.py` (Pydantic Settings + .env)
 
-### 📋 FAZ 4: Strateji Motoru (V1: Pure Market Making)
-- [ ] Temel quoting fonksiyonu
-- [ ] Basit inventory yönetimi
-- [ ] Quote lifecycle yönetimi
-- [ ] Event-driven loop
+### ✅ FAZ 4: Strateji Motoru (V1: Pure Market Making)
+- [x] Temel quoting fonksiyonu - `src/strategy/pricing.py`
+- [x] Basit inventory yönetimi - `src/strategy/inventory.py`
+- [x] Quote lifecycle yönetimi - `src/strategy/market_maker.py`
+- [x] Event-driven loop - `src/apps/paper_trading.py`, `src/strategy/market_maker.py`
 
-### 📋 FAZ 5: Risk & Limit Katmanı
-- [ ] Pre-trade risk kontrolleri
-- [ ] Pozisyon & zarar limitleri
-- [ ] Kill switch implementasyonu
-- [ ] Post-trade kontroller
+### ✅ FAZ 5: Risk & Limit Katmanı
+- [x] Pre-trade risk kontrolleri - `src/risk/guardian.py`, `src/risk/limits.py`
+- [x] Pozisyon & zarar limitleri - `src/risk/limits.py`
+- [x] Kill switch implementasyonu - `src/risk/guardian.py`
+- [ ] Post-trade kontroller (kısmen - monitoring metrics var, detaylı analiz eksik)
 
-### 📋 FAZ 6: Simülasyon & Backtest Altyapısı
-- [ ] Basit L1 simülatörü
-- [ ] Event-driven backtest engine
-- [ ] Gerçek veri ile backtest
-- [ ] Calibration & parameter sweep
+### ✅ FAZ 6: Simülasyon & Backtest Altyapısı
+- [x] Basit L1 simülatörü - `src/execution/simulated_exchange.py` (Live Paper Exchange)
+- [x] Event-driven backtest engine - `src/backtest/engine.py`
+- [x] Gerçek veri ile backtest - `src/backtest/data_loader.py`
+- [ ] Calibration & parameter sweep (manuel test senaryoları var, otomatik sweep eksik)
 
 ## Geliştirme Sırası (Modül Bazlı)
 

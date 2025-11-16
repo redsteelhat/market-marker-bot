@@ -63,18 +63,30 @@ MonitoringService (Log, Metrics, Alerts)
 
 **REST veya Private WebSocket üzerinden:**
 
+**Interface:**
+- `IExchangeClient` (abstract base class) - `src/core/exchange.py`
+  - Exchange-agnostic interface tanımı
+  - Gerçek exchange ve simulated exchange için ortak API
+
+**Implementasyonlar:**
+- `BinanceClient` - Gerçek Binance Futures API client
+- `BinancePublicClient` - Public API client (sadece market data, KYC gerektirmez)
+- `SimulatedExchangeClient` - Paper trading için lokal simülasyon
+
 **Fonksiyonlar:**
-- `place_limit_order(side, price, size, symbol)` → `Order`
-- `cancel_order(order_id)` → `bool`
-- `cancel_all(symbol)` → `List[Order]`
+- `submit_order(order: Order)` → `Order`
+- `cancel_order(order_id, symbol)` → `bool`
+- `cancel_all_orders(symbol)` → `int`
 - `get_open_orders(symbol)` → `List[Order]`
-- `get_positions(symbol)` → `Position`
+- `get_positions(symbol)` → `List[Position]`
+- `get_trades(symbol, limit)` → `List[Trade]`
 
 **Özellikler:**
 - Rate limit handling (HTTP 429)
 - Network timeout handling
 - Error handling ve retry logic
 - Order state synchronization
+- Paper trading modu için lokal order matching
 
 ### 4. Konfigürasyon Yönetimi
 
@@ -273,6 +285,25 @@ def trigger_kill_switch(reason: str):
 Market maker'i OHLC bar ile test etmek yetmez; ideal olan, **order book ve emir akışı** ile simüle etmek. Akademik çalışmalar Avellaneda–Stoikov ve türev modelleri için genelde:
 - Mid price için diffusion / random walk
 - Müşteri emirleri için Poisson/Hawkes süreçleri kullanıyor
+
+### 0. Live Paper Exchange (✅ Implemented)
+
+**Mimari:**
+- `BinancePublicClient` - Canlı market data (public API, KYC gerektirmez)
+- `SimulatedExchangeClient` - Lokal order matching ve position tracking
+- `paper_trading.py` - İki client'ı birleştiren orchestrator
+
+**Özellikler:**
+- Gerçek zamanlı order book verisi
+- Lokal order matching (fill simulation)
+- Position ve PnL tracking
+- Risk kontrolleri ve kill switch çalışıyor
+- Hiç gerçek para riski yok
+
+**Kullanım:**
+```bash
+python -m src.apps.main run --mode paper_exchange --symbol BTCUSDT
+```
 
 ### 1. Basit L1 Simülatörü
 
