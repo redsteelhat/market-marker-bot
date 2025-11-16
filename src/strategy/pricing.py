@@ -29,6 +29,8 @@ class PricingEngine:
         orderbook: OrderBookSnapshot,
         current_inventory: Decimal,
         volatility_estimate: Optional[Decimal] = None,
+        depth_bid_notional: Optional[Decimal] = None,
+        depth_ask_notional: Optional[Decimal] = None,
     ) -> Quote:
         """Compute bid/ask quote.
 
@@ -45,8 +47,8 @@ class PricingEngine:
         if not mid:
             raise ValueError("Cannot compute quote: no mid price available")
 
-        # Calculate base spread
-        spread_bps = self._calculate_spread(volatility_estimate)
+        # Calculate dynamic spread
+        spread_bps = self._calculate_spread(volatility_estimate, depth_bid_notional, depth_ask_notional)
 
         # Apply inventory skew to mid price
         skewed_mid = self._apply_inventory_skew(mid, current_inventory)
@@ -76,7 +78,12 @@ class PricingEngine:
             ask_size=ask_size,
         )
 
-    def _calculate_spread(self, volatility_estimate: Optional[Decimal] = None) -> Decimal:
+    def _calculate_spread(
+        self,
+        volatility_estimate: Optional[Decimal] = None,
+        depth_bid_notional: Optional[Decimal] = None,
+        depth_ask_notional: Optional[Decimal] = None,
+    ) -> Decimal:
         """Calculate spread in basis points.
 
         Args:
@@ -87,14 +94,28 @@ class PricingEngine:
         """
         base_spread = Decimal(str(self.config.base_spread_bps))
 
-        # Adjust for volatility if provided
-        if volatility_estimate and self.config.vol_spread_factor > 0:
-            # Normalize volatility (assuming 1.0 is normal)
-            # In practice, you'd calculate this from historical data
-            vol_adjustment = volatility_estimate * Decimal(str(self.config.vol_spread_factor))
-            adjusted_spread = base_spread + vol_adjustment
-        else:
-            adjusted_spread = base_spread
+        adjusted_spread = base_spread
+
+        # Adjust for volatility (volatility_estimate in bps std)
+        if volatility_estimate is not None and self.config.vol_spread_factor > 0:
+            # scale factor: vol_spread_factor bps per 1 bps vol
+            adjusted_spread = adjusted_spread + (volatility_estimate * Decimal(str(self.config.vol_spread_factor)))
+
+        # Adjust for depth imbalance (if shallow book, widen; deep book, tighten slightly)
+        try:
+            if depth_bid_notional is not None and depth_ask_notional is not None:
+                total = depth_bid_notional + depth_ask_notional
+                if total > 0:
+                    depth_ratio = (depth_bid_notional + depth_ask_notional) / total  # == 1, placeholder
+                    # Use absolute imbalance to widen
+                    imbalance = abs(depth_bid_notional - depth_ask_notional) / total
+                    # If very imbalanced or very shallow (low total), widen a bit
+                    shallow_factor = Decimal("0.0")
+                    if total < Decimal("1000"):  # 1000 USDT within range considered shallow
+                        shallow_factor = Decimal("2.0")  # widen by +2 bps
+                    adjusted_spread = adjusted_spread + (imbalance * Decimal("10")) + shallow_factor
+        except Exception:
+            pass
 
         # Clamp to min/max spread
         min_spread = Decimal(str(self.config.min_spread_bps))

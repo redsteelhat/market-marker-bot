@@ -9,6 +9,7 @@ from typing import Optional
 from src.core.models import Order, Position, PnLState, RiskLimits
 from src.core.config import RiskConfig
 from src.risk.limits import RiskLimitsChecker
+from src.risk.metrics import RiskMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,61 @@ class RiskGuardian:
                 return (False, reason)
 
         return (True, None)
+
+    def should_pause_quotes(
+        self,
+        volatility_bps: Optional[Decimal],
+        bid_depth_notional: Decimal,
+        ask_depth_notional: Decimal,
+        vol_threshold_bps: Decimal = Decimal("50"),
+        imbalance_threshold: Decimal = Decimal("0.6"),
+    ) -> tuple[bool, Optional[str]]:
+        """Decide whether to pause quoting due to volatility or imbalance.
+
+        Returns:
+            (should_pause, reason)
+        """
+        try:
+            if RiskMetrics.is_too_volatile(volatility_bps, vol_threshold_bps):
+                return (True, f"high_volatility({volatility_bps} bps >= {vol_threshold_bps} bps)")
+            imb = RiskMetrics.orderbook_imbalance(bid_depth_notional, ask_depth_notional)
+            if imb is not None and abs(imb) >= imbalance_threshold:
+                return (True, f"toxic_imbalance({imb:.2f})")
+        except Exception:
+            pass
+        return (False, None)
+
+    def evaluate_toxicity(
+        self,
+        volatility_bps: Optional[Decimal],
+        bid_depth_notional: Decimal,
+        ask_depth_notional: Decimal,
+        vol_threshold_bps_soft: Decimal = Decimal("50"),
+        imbalance_soft: Decimal = Decimal("0.70"),
+        imbalance_hard: Decimal = Decimal("0.90"),
+    ) -> tuple[str, Optional[str], Optional[Decimal]]:
+        """Evaluate market toxicity and suggest action.
+
+        Returns:
+            (action, reason, imbalance)
+            action in {"pause", "degrade", "normal"}
+        """
+        try:
+            # Volatility-based degradation
+            if RiskMetrics.is_too_volatile(volatility_bps, vol_threshold_bps_soft):
+                return ("degrade", f"elevated_volatility({volatility_bps} bps >= {vol_threshold_bps_soft} bps)", None)
+
+            # Orderbook imbalance-based action
+            imb = RiskMetrics.orderbook_imbalance(bid_depth_notional, ask_depth_notional)
+            if imb is not None:
+                aimb = abs(imb)
+                if aimb >= imbalance_hard:
+                    return ("pause", f"toxic_imbalance({imb:.2f})>=hard({imbalance_hard})", imb)
+                if aimb >= imbalance_soft:
+                    return ("degrade", f"elevated_imbalance({imb:.2f})>=soft({imbalance_soft})", imb)
+        except Exception:
+            pass
+        return ("normal", None, None)
 
     def check_inventory_limits(
         self, position: Position, inventory_hard_limit_pct: Decimal

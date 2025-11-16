@@ -23,6 +23,7 @@ from src.execution.order_manager import OrderManager
 from src.risk.guardian import RiskGuardian
 from src.strategy.market_maker import MarketMaker
 from src.monitoring.metrics import MetricsCollector, collect_snapshot
+from src.monitoring.journal import TradeJournal, JournalConfig
 from src.monitoring.alerts import AlertManager, AlertThresholds
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,10 @@ async def run_paper_trading(settings: Settings):
     )
 
     try:
+        # Prepare run directory for journaling
+        run_dir_ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        run_dir = f"runs/{run_dir_ts}"
+        journal = TradeJournal(JournalConfig(run_dir=run_dir), initial_equity=Decimal(str(settings.bot_equity_usdt)))
         # Test connection
         console.print("[cyan]Testing public API connection...[/cyan]")
         test_symbol = settings.symbols[0] if settings.symbols else "BTCUSDT"
@@ -69,6 +74,19 @@ async def run_paper_trading(settings: Settings):
         risk_guardian = RiskGuardian(
             settings.risk, Decimal(str(settings.bot_equity_usdt))
         )
+        
+        # Config summary
+        console.print("[dim]\n[CONFIG] Mode: paper_exchange[/dim]")
+        console.print(f"[dim][CONFIG] Symbols: {', '.join(settings.symbols)}[/dim]")
+        try:
+            console.print(f"[dim][CONFIG] Base spread (bps): {settings.strategy.base_spread_bps}[/dim]")
+        except Exception:
+            pass
+        try:
+            console.print(f"[dim][CONFIG] Order notional %: {settings.strategy.order_notional_pct}[/dim]")
+        except Exception:
+            pass
+        console.print("[dim][CONFIG] Toxicity thresholds: soft=0.70, hard=0.90[/dim]\n")
         
         # Create metrics collector
         metrics_collector = MetricsCollector(Decimal(str(settings.bot_equity_usdt)))
@@ -179,6 +197,8 @@ async def run_paper_trading(settings: Settings):
         status_interval = timedelta(minutes=5)  # Print status every 5 minutes
         last_debug_log = datetime.utcnow()
         debug_interval = timedelta(seconds=10)  # Debug log every 10 seconds (for testing)
+        last_journal_append = datetime.utcnow()
+        journal_interval = timedelta(seconds=10)  # append new trades every 10s
         
         try:
             while True:
@@ -212,6 +232,16 @@ async def run_paper_trading(settings: Settings):
                     except Exception as e:
                         logger.error(f"Error in debug logging: {e}")
                     last_debug_log = now
+
+                # Append new trades to journal periodically
+                now = datetime.utcnow()
+                if now - last_journal_append >= journal_interval:
+                    try:
+                        latest_trades = await simulated_exchange.get_trades(limit=1000)
+                        journal.append_new_trades(latest_trades)
+                    except Exception as e:
+                        logger.error(f"Journal append error: {e}")
+                    last_journal_append = now
 
                 # Check kill switch
                 if risk_guardian.is_kill_switch_active():
@@ -288,6 +318,20 @@ async def run_paper_trading(settings: Settings):
                 initial_equity=Decimal(str(settings.bot_equity_usdt)),
                 metrics_collector=metrics_collector,
             )
+
+            # Write session summary to journal
+            try:
+                journal.write_summary(
+                    positions=positions,
+                    trades=trades,
+                    equity=snapshot.equity,
+                    realized_pnl=snapshot.realized_pnl,
+                    unrealized_pnl=snapshot.unrealized_pnl,
+                )
+                console.print(f"[green]Session journal saved to: {run_dir}[/green]")
+                console.print(f"[dim]- trades.csv (all trades)\n- summary.md (session report)[/dim]")
+            except Exception as e:
+                logger.error(f"Error writing session summary: {e}")
             
             final_table = Table(title="Final Performance", show_header=True)
             final_table.add_column("Metric", style="cyan")

@@ -171,6 +171,21 @@ class RiskMetrics:
         return filled_qty / total_qty
 
     @staticmethod
+    def is_too_volatile(volatility_bps: Optional[Decimal], threshold_bps: Decimal = Decimal("50")) -> bool:
+        """Return True if short-term volatility (bps) exceeds threshold."""
+        if volatility_bps is None:
+            return False
+        return volatility_bps >= threshold_bps
+
+    @staticmethod
+    def orderbook_imbalance(bid_notional: Decimal, ask_notional: Decimal) -> Optional[Decimal]:
+        """Compute order book imbalance in [-1,1]."""
+        total = bid_notional + ask_notional
+        if total == 0:
+            return None
+        return (bid_notional - ask_notional) / total
+
+    @staticmethod
     def calculate_realized_pnl(trades: List[Trade]) -> Decimal:
         """Calculate realized PnL from trades.
 

@@ -168,6 +168,11 @@ class InventoryManager:
         """
         return self.target_inventory
 
+    def get_inventory_deviation(self, position: Optional[Position]) -> Decimal:
+        """Deviation from target inventory (quote asset quantity)."""
+        current = self.get_inventory_quantity(position)
+        return current - self.target_inventory
+
     def calculate_inventory_drift(self, position: Optional[Position]) -> Decimal:
         """Calculate how far inventory is from target.
 

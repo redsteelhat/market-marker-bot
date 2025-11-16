@@ -6,7 +6,8 @@ and spread computation.
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, Deque, List
+from collections import deque
 from src.core.models import OrderBookSnapshot, OrderBookLevel
 
 
@@ -22,6 +23,8 @@ class OrderBookManager:
         self.symbol = symbol
         self.snapshot: Optional[OrderBookSnapshot] = None
         self.last_update: Optional[datetime] = None
+        # Keep recent mid prices for realized volatility calc
+        self._recent_mid_prices: Deque[Decimal] = deque(maxlen=200)
 
     def update_from_binance(self, data: dict) -> None:
         """Update order book from Binance API response.
@@ -45,6 +48,9 @@ class OrderBookManager:
             timestamp=datetime.utcnow(),
         )
         self.last_update = datetime.utcnow()
+        # Track mid history
+        if self.snapshot.mid_price:
+            self._recent_mid_prices.append(self.snapshot.mid_price)
 
     def update_from_websocket(self, update: dict) -> None:
         """Update order book from WebSocket stream.
@@ -96,6 +102,9 @@ class OrderBookManager:
 
         self.snapshot.timestamp = datetime.utcnow()
         self.last_update = datetime.utcnow()
+        # Track mid history
+        if self.snapshot and self.snapshot.mid_price:
+            self._recent_mid_prices.append(self.snapshot.mid_price)
 
     def update_from_snapshot(self, snapshot: OrderBookSnapshot) -> None:
         """Update order book from snapshot.
@@ -223,4 +232,48 @@ class OrderBookManager:
 
         age = (datetime.utcnow() - self.last_update).total_seconds()
         return age > max_age_seconds
+
+    def get_recent_mids(self, n: int = 30) -> List[Decimal]:
+        """Return last N mid prices."""
+        if n <= 0:
+            return list(self._recent_mid_prices)
+        return list(self._recent_mid_prices)[-n:]
+
+    def get_realized_volatility(self, n: int = 30) -> Optional[Decimal]:
+        """Compute simple realized volatility over last N mids (std of returns).
+
+        Returns:
+            Volatility as Decimal (approx std of pct changes), or None if insufficient data.
+        """
+        mids = self.get_recent_mids(n)
+        if len(mids) < 3:
+            return None
+        # simple pct returns
+        returns: List[Decimal] = []
+        for i in range(1, len(mids)):
+            if mids[i-1] == 0:
+                continue
+            r = (mids[i] - mids[i-1]) / mids[i-1]
+            returns.append(r)
+        if len(returns) < 2:
+            return None
+        mean = sum(returns) / Decimal(len(returns))
+        var = sum((r - mean) * (r - mean) for r in returns) / Decimal(len(returns) - 1)
+        if var < 0:
+            return Decimal("0")
+        # convert to bps-equivalent magnitude for easier tuning
+        return (var.sqrt()) * Decimal("10000")
+
+    def get_depth_volume_bps(self, side: str, price_range_bps: Decimal = Decimal("10")) -> Decimal:
+        """Aggregate notional within given bps from mid on one side.
+
+        Args:
+            side: 'bid' or 'ask'
+            price_range_bps: range around mid in bps (e.g., 10 = 0.10%)
+        """
+        if not self.snapshot or not self.snapshot.mid_price:
+            return Decimal("0")
+        mid = self.snapshot.mid_price
+        pct = price_range_bps / Decimal("10000")
+        return self.get_total_liquidity(side, price_range_pct=pct)
 

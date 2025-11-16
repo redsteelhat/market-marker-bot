@@ -61,10 +61,21 @@ class MarketMaker:
         # Log throttling for risk warnings
         self._last_risk_warning_at: dict[str, datetime] = {}
         self._risk_warning_throttle_seconds = 10
+        
+        # Quote pause state to prevent log spam
+        self._is_paused: bool = False
+        self._last_pause_reason: Optional[str] = None
+        self._last_pause_log_at: Optional[datetime] = None
+        self._pause_log_cooldown_seconds: int = 2
 
         # Refresh control
         self._last_refresh_at: Optional[datetime] = None
         self._last_mid: Optional[Decimal] = None
+        
+        # Degraded quoting state
+        self._degraded_active: bool = False
+        self._degraded_last_reason: Optional[str] = None
+        self._degrade_size_multiplier: Optional[Decimal] = None
 
     async def start(self) -> None:
         """Start market maker."""
@@ -192,20 +203,98 @@ class MarketMaker:
         # Get current inventory
         inventory_qty = self.inventory_manager.get_inventory_quantity(self.current_position)
 
-        # Calculate volatility estimate (simplified - should come from volatility calculator)
-        volatility_estimate = None
+        # Calculate short-term volatility (bps) and depth metrics
+        volatility_estimate = self.orderbook_manager.get_realized_volatility(n=30)
+        depth_bid = self.orderbook_manager.get_depth_volume_bps("bid", Decimal("10"))  # within 10 bps
+        depth_ask = self.orderbook_manager.get_depth_volume_bps("ask", Decimal("10"))
+
+        # Risk: evaluate toxicity with soft/hard behavior
+        action, tox_reason, imbalance = self.risk_guardian.evaluate_toxicity(
+            volatility_bps=volatility_estimate,
+            bid_depth_notional=depth_bid,
+            ask_depth_notional=depth_ask,
+        )
+        if action == "pause":
+            # Enter/maintain paused state with throttled logging
+            await self.order_manager.cancel_all_orders(self.symbol)
+            now = datetime.utcnow()
+            should_log = False
+            if not self._is_paused:
+                should_log = True
+            elif tox_reason != self._last_pause_reason:
+                should_log = True
+            elif not self._last_pause_log_at or (now - self._last_pause_log_at).total_seconds() >= self._pause_log_cooldown_seconds:
+                should_log = True
+
+            if should_log:
+                logger.info(f"QUOTE_PAUSED for {self.symbol}: {tox_reason}")
+                self._last_pause_log_at = now
+
+            self._is_paused = True
+            self._last_pause_reason = tox_reason
+            # Leaving degraded mode if any
+            if self._degraded_active:
+                logger.info(f"QUOTE_NORMALIZED for {self.symbol} (leaving degraded due to PAUSE)")
+            self._degraded_active = False
+            self._degraded_last_reason = None
+            self._degrade_size_multiplier = None
+            return
+        else:
+            # If previously paused, log a single resume event
+            if self._is_paused:
+                logger.info(f"QUOTE_RESUMED for {self.symbol}")
+            self._is_paused = False
+            self._last_pause_reason = None
+
+        # Handle degraded mode (wider spreads, smaller size, possibly one-sided quoting)
+        degraded_this_cycle = (action == "degrade")
+        if degraded_this_cycle and not self._degraded_active:
+            logger.info(f"QUOTE_DEGRADED for {self.symbol}: {tox_reason}")
+        if not degraded_this_cycle and self._degraded_active:
+            logger.info(f"QUOTE_NORMALIZED for {self.symbol}")
+        self._degraded_active = degraded_this_cycle
+        self._degraded_last_reason = tox_reason if degraded_this_cycle else None
+        self._degrade_size_multiplier = Decimal("0.5") if degraded_this_cycle else None
 
         # Compute new quote
         try:
-            quote = self.pricing_engine.compute_quote(snapshot, inventory_qty, volatility_estimate)
+            quote = self.pricing_engine.compute_quote(
+                snapshot,
+                inventory_qty,
+                volatility_estimate=volatility_estimate,
+                depth_bid_notional=depth_bid,
+                depth_ask_notional=depth_ask,
+            )
             logger.debug(f"Computed quote for {self.symbol}: bid={quote.bid_price}, ask={quote.ask_price}, mid={snapshot.mid_price}")
         except Exception as e:
             logger.error(f"Error computing quote: {e}")
             return
 
-        # Check if we should quote each side
+        # If degraded, widen spreads around mid and possibly one-side quote
         should_quote_bid = self.inventory_manager.should_quote_bid(self.current_position)
         should_quote_ask = self.inventory_manager.should_quote_ask(self.current_position)
+        if self._degraded_active and snapshot and snapshot.mid_price:
+            widen_bps = Decimal("5")  # 5 bps widen on each side
+            mid_price = snapshot.mid_price
+            widen_amount = (mid_price * widen_bps) / Decimal("10000")
+            try:
+                # Adjust prices outward
+                if getattr(quote, "bid_price", None):
+                    quote.bid_price = quote.bid_price - widen_amount
+                if getattr(quote, "ask_price", None):
+                    quote.ask_price = quote.ask_price + widen_amount
+                # Asymmetric quoting depending on imbalance direction if available
+                if imbalance is not None:
+                    if imbalance > 0:
+                        # More bid-side depth; avoid placing additional bids
+                        should_quote_bid = False
+                    elif imbalance < 0:
+                        # More ask-side depth; avoid placing additional asks
+                        should_quote_ask = False
+            except Exception as e:
+                logger.error(f"Error applying degraded adjustments: {e}")
+
+        # Check if we should quote each side (post-adjustment)
 
         # Update orders
         await self._update_orders(quote, should_quote_bid, should_quote_ask)
@@ -284,6 +373,8 @@ class MarketMaker:
         # Calculate order size
         bot_equity = Decimal(str(self.settings.bot_equity_usdt))
         size = self.pricing_engine.calculate_order_size(quote.bid_price, bot_equity)
+        if self._degrade_size_multiplier:
+            size = (size * self._degrade_size_multiplier).quantize(Decimal("0.00000001"))
 
         # Create order
         from src.core.models import OrderSide
@@ -348,6 +439,8 @@ class MarketMaker:
         # Calculate order size
         bot_equity = Decimal(str(self.settings.bot_equity_usdt))
         size = self.pricing_engine.calculate_order_size(quote.ask_price, bot_equity)
+        if self._degrade_size_multiplier:
+            size = (size * self._degrade_size_multiplier).quantize(Decimal("0.00000001"))
 
         # Create order
         from src.core.models import OrderSide

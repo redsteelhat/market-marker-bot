@@ -27,24 +27,34 @@ from src.risk.guardian import RiskGuardian
 from src.strategy.market_maker import MarketMaker
 from src.apps.paper_trading import run_paper_trading
 from src.monitoring.metrics import collect_snapshot, MetricsCollector
+from src.utils.logging import setup_logging
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+# Setup logging (rich handler with symbol-safe format)
+setup_logging(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = typer.Typer(help="Market Maker Bot CLI")
+app = typer.Typer(help="Market Maker Bot CLI - run, monitor, and calibrate the market maker")
 console = Console()
 
 
-@app.command()
+@app.command(help="Run the market maker. Examples:\n  python -m src.apps.main run --mode paper_exchange --symbols BTCUSDT,ETHUSDT\n  python -m src.apps.main run -m backtest -s BTCUSDT --spread-bps 6 --order-notional-pct 0.01")
 def run(
     mode: str = typer.Option("paper_exchange", "--mode", "-m", help="Trading mode: live|paper_exchange|dry_run|backtest"),
-    symbol: Optional[str] = typer.Option(None, "--symbol", "-s", help="Trading symbol (e.g., BTCUSDT)"),
+    symbol: Optional[str] = typer.Option(None, "--symbol", "-s", help="Single trading symbol (e.g., BTCUSDT)"),
+    symbols: Optional[str] = typer.Option(None, "--symbols", help="Comma-separated symbols, e.g., BTCUSDT,ETHUSDT"),
+    spread_bps: Optional[float] = typer.Option(None, "--spread-bps", help="Override base spread (bps, full spread)"),
+    order_notional_pct: Optional[float] = typer.Option(None, "--order-notional-pct", help="Override order notional pct of bot equity (e.g., 0.01)"),
+    refresh_ms: Optional[int] = typer.Option(None, "--refresh-ms", help="Override quote refresh interval (ms)"),
+    bot_equity: Optional[float] = typer.Option(None, "--bot-equity", help="Override bot equity in USDT (e.g., 100)"),
+    log_level: str = typer.Option("INFO", "--log-level", help="Log level: DEBUG|INFO|WARNING|ERROR"),
 ):
     """Run the market maker bot."""
+    # Set log level early
+    try:
+        logging.getLogger().setLevel(getattr(logging, log_level.upper()))
+    except Exception:
+        logging.getLogger().setLevel(logging.INFO)
+
     console.print(Panel.fit("Starting Market Maker Bot", style="bold green"))
     
     try:
@@ -58,8 +68,21 @@ def run(
             console.print(f"[red]Invalid mode: {mode}. Use: live, paper_exchange, dry_run, or backtest[/red]")
             sys.exit(1)
         
-        if symbol:
-            settings.symbols = [symbol]
+        # Symbols override
+        if symbols:
+            settings.symbols = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+        elif symbol:
+            settings.symbols = [symbol.strip().upper()]
+
+        # Strategy overrides
+        if spread_bps is not None:
+            settings.strategy.base_spread_bps = float(spread_bps)
+        if order_notional_pct is not None:
+            settings.strategy.order_notional_pct = float(order_notional_pct)
+        if refresh_ms is not None:
+            settings.strategy.refresh_interval_ms = int(refresh_ms)
+        if bot_equity is not None:
+            settings.bot_equity_usdt = float(bot_equity)
         
         if not settings.symbols:
             console.print("[red]Error: No symbols configured. Use --symbol or set in config.[/red]")
@@ -138,6 +161,26 @@ def run(
         sys.exit(1)
 
 
+@app.command(help="Quickstart paper trading with sensible defaults.")
+def quickstart(
+    symbols: str = typer.Option("BTCUSDT,ETHUSDT", "--symbols", "-s", help="Comma-separated symbols"),
+    spread_bps: int = typer.Option(6, "--spread-bps", help="Base spread (bps, full spread)"),
+    order_notional_pct: float = typer.Option(0.01, "--order-notional-pct", help="Order notional pct of bot equity"),
+    refresh_ms: int = typer.Option(1000, "--refresh-ms", help="Quote refresh interval (ms)"),
+    log_level: str = typer.Option("INFO", "--log-level", help="Log level: DEBUG|INFO|WARNING|ERROR"),
+):
+    """Run paper trading mode with common overrides in one command."""
+    run(
+        mode="paper_exchange",
+        symbol=None,
+        symbols=symbols,
+        spread_bps=float(spread_bps),
+        order_notional_pct=float(order_notional_pct),
+        refresh_ms=int(refresh_ms),
+        log_level=log_level,
+    )
+
+
 @app.command()
 def status():
     """Show bot status with detailed metrics."""
@@ -180,6 +223,46 @@ def stop():
     # TODO: Implement graceful shutdown
     console.print("[green]Bot stopped[/green]")
 
+
+@app.command(help="Show effective configuration (after environment and CLI overrides).")
+def config_show():
+    try:
+        settings = Settings.from_env()
+        table = Table(title="Effective Configuration", show_header=True)
+        table.add_column("Key", style="cyan")
+        table.add_column("Value", style="magenta")
+        table.add_row("Mode", settings.trading_mode.value)
+        table.add_row("Symbols", ", ".join(settings.symbols))
+        table.add_row("Bot Equity (USDT)", str(settings.bot_equity_usdt))
+        table.add_row("Base Spread (bps)", str(settings.strategy.base_spread_bps))
+        table.add_row("Order Notional Pct", str(settings.strategy.order_notional_pct))
+        table.add_row("Refresh Interval (ms)", str(settings.strategy.refresh_interval_ms))
+        console.print(table)
+    except Exception as e:
+        console.print(f"[red]Error showing config: {e}[/red]")
+        logger.exception("Config show error")
+        sys.exit(1)
+
+
+@app.command(help="Run parameter sweep for calibration (grid search).")
+def sweep(
+    symbols: str = typer.Option("BTCUSDT", "--symbols", "-s", help="Comma-separated symbols"),
+    spreads: str = typer.Option("4,6,8,10,12", "--spreads", help="Comma-separated base_spread_bps values"),
+    sizes: str = typer.Option("0.005,0.01,0.015,0.02", "--sizes", help="Comma-separated order_notional_pct values"),
+    max_runs: int = typer.Option(20, "--max-runs", help="Maximum combinations to run"),
+):
+    """Run grid search across spread and size to rank configurations."""
+    try:
+        from scripts.parameter_sweep import SweepConfig, sweep as run_sweep
+        syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+        spread_vals = [int(x.strip()) for x in spreads.split(",") if x.strip()]
+        size_vals = [float(x.strip()) for x in sizes.split(",") if x.strip()]
+        cfg = SweepConfig(symbols=syms, base_spread_bps_values=spread_vals, order_notional_pct_values=size_vals, max_runs=max_runs)
+        asyncio.run(run_sweep(cfg))
+    except Exception as e:
+        console.print(f"[red]Sweep error: {e}[/red]")
+        logger.exception("Sweep error")
+        sys.exit(1)
 
 async def _run_bot(settings: Settings, dry_run: bool = False):
     """Run bot in live mode (for future Binance TR integration)."""
