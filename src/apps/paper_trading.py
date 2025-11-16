@@ -8,9 +8,11 @@ This module runs the market maker bot in paper trading mode:
 
 import asyncio
 import logging
+from datetime import datetime, timedelta
 from decimal import Decimal
 from rich.console import Console
 from rich.panel import Panel
+from rich.table import Table
 
 from src.core.config import Settings
 from src.data.binance_public_client import BinancePublicClient
@@ -20,6 +22,7 @@ from src.execution.simulated_exchange import SimulatedExchangeClient
 from src.execution.order_manager import OrderManager
 from src.risk.guardian import RiskGuardian
 from src.strategy.market_maker import MarketMaker
+from src.monitoring.metrics import MetricsCollector, collect_snapshot
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -65,6 +68,9 @@ async def run_paper_trading(settings: Settings):
         risk_guardian = RiskGuardian(
             settings.risk, Decimal(str(settings.bot_equity_usdt))
         )
+        
+        # Create metrics collector
+        metrics_collector = MetricsCollector(Decimal(str(settings.bot_equity_usdt)))
 
         # Create market makers
         market_makers = []
@@ -134,6 +140,9 @@ async def run_paper_trading(settings: Settings):
             ws_client = None
 
         # Keep running
+        last_status_print = datetime.utcnow()
+        status_interval = timedelta(minutes=5)  # Print status every 5 minutes
+        
         try:
             while True:
                 await asyncio.sleep(1)
@@ -146,7 +155,34 @@ async def run_paper_trading(settings: Settings):
                     break
 
                 # Print status periodically
-                # TODO: Add status display
+                now = datetime.utcnow()
+                if now - last_status_print >= status_interval:
+                    try:
+                        positions = await simulated_exchange.get_positions()
+                        open_orders = await simulated_exchange.get_open_orders()
+                        trades = await simulated_exchange.get_trades(limit=1000)
+                        
+                        snapshot = await collect_snapshot(
+                            exchange=simulated_exchange,
+                            risk_guardian=risk_guardian,
+                            positions=positions,
+                            open_orders=open_orders,
+                            trades=trades,
+                            initial_equity=Decimal(str(settings.bot_equity_usdt)),
+                            metrics_collector=metrics_collector,
+                        )
+                        
+                        console.print(f"\n[bold cyan]Status Update ({now.strftime('%H:%M:%S')}):[/bold cyan]")
+                        console.print(f"  Equity: {snapshot.equity:.2f} USDT | PnL: {snapshot.total_pnl:+.2f} USDT")
+                        console.print(f"  Trades: {snapshot.total_trades} | Open Orders: {snapshot.open_orders_count}")
+                        if snapshot.sharpe_ratio:
+                            console.print(f"  Sharpe (24h): {snapshot.sharpe_ratio:.2f}")
+                        if snapshot.kill_switch_active:
+                            console.print(f"  [red]KILL SWITCH: {snapshot.kill_switch_reason}[/red]")
+                        
+                        last_status_print = now
+                    except Exception as e:
+                        logger.error(f"Error printing status: {e}")
 
         except KeyboardInterrupt:
             console.print("\n[yellow]Stopping paper trading...[/yellow]")
@@ -168,14 +204,43 @@ async def run_paper_trading(settings: Settings):
             # Print final stats
             console.print("\n[bold]Final Statistics:[/bold]")
             positions = await simulated_exchange.get_positions()
-            trades = await simulated_exchange.get_trades(limit=100)
-            equity = simulated_exchange.get_equity()
-
-            console.print(f"  Equity: {equity} USDT")
-            console.print(f"  Total Trades: {len(trades)}")
-            console.print(f"  Open Positions: {len(positions)}")
-            for pos in positions:
-                console.print(f"    {pos.symbol}: {pos.quantity} @ {pos.entry_price} (PnL: {pos.unrealized_pnl})")
+            open_orders = await simulated_exchange.get_open_orders()
+            trades = await simulated_exchange.get_trades(limit=1000)
+            
+            snapshot = await collect_snapshot(
+                exchange=simulated_exchange,
+                risk_guardian=risk_guardian,
+                positions=positions,
+                open_orders=open_orders,
+                trades=trades,
+                initial_equity=Decimal(str(settings.bot_equity_usdt)),
+                metrics_collector=metrics_collector,
+            )
+            
+            final_table = Table(title="Final Performance", show_header=True)
+            final_table.add_column("Metric", style="cyan")
+            final_table.add_column("Value", style="magenta")
+            
+            final_table.add_row("Initial Equity", f"{settings.bot_equity_usdt} USDT")
+            final_table.add_row("Final Equity", f"{snapshot.equity:.2f} USDT")
+            final_table.add_row("Total PnL", f"{snapshot.total_pnl:+.2f} USDT")
+            final_table.add_row("Realized PnL", f"{snapshot.realized_pnl:+.2f} USDT")
+            final_table.add_row("Unrealized PnL", f"{snapshot.unrealized_pnl:+.2f} USDT")
+            final_table.add_row("Total Trades", str(snapshot.total_trades))
+            final_table.add_row("Trades Today", str(snapshot.trades_today))
+            
+            if snapshot.max_drawdown_pct > 0:
+                final_table.add_row("Max Drawdown", f"{snapshot.max_drawdown:.2f} USDT ({snapshot.max_drawdown_pct:.2f}%)")
+            
+            if snapshot.sharpe_ratio:
+                final_table.add_row("Sharpe Ratio (24h)", f"{snapshot.sharpe_ratio:.2f}")
+            
+            console.print(final_table)
+            
+            if positions:
+                console.print("\n[bold]Final Positions:[/bold]")
+                for pos in positions:
+                    console.print(f"  {pos.symbol}: {pos.quantity:.6f} @ {pos.entry_price} (PnL: {pos.unrealized_pnl:+.2f} USDT)")
 
             console.print("[green]Paper trading stopped[/green]")
 

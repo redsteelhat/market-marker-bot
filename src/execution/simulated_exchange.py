@@ -249,6 +249,10 @@ class SimulatedExchangeClient(IExchangeClient):
         self.trades.append(trade)
         logger.info(f"Simulated fill: {trade.trade_id} {trade.side.value} {trade.quantity} @ {trade.price}")
 
+        # Keep only last 10k trades to prevent memory leak
+        if len(self.trades) > 10000:
+            self.trades = self.trades[-10000:]
+
         # Update position
         await self._update_position(trade, snapshot)
 

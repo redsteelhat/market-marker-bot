@@ -49,23 +49,47 @@ EXCHANGE_TESTNET=true  # Set to false for production
 ## Usage
 
 ### Run the bot:
+
+**Paper Trading Mode (Default - Live Data + Local Simulation):**
 ```bash
-python -m src.apps.main run
+python -m src.apps.main run --mode paper_exchange
 ```
 
-### Run in dry-run mode (no real orders):
+**Run with specific symbol:**
 ```bash
-python -m src.apps.main run --dry-run
+python -m src.apps.main run --mode paper_exchange --symbol BTCUSDT
 ```
 
-### Check bot status:
+**Dry Run Mode (No Orders, Logging Only):**
+```bash
+python -m src.apps.main run --mode dry_run
+```
+
+**Backtest Mode (Requires Historical Data):**
+```bash
+python -m src.apps.main run --mode backtest --symbol BTCUSDT
+```
+
+**Check bot status with detailed metrics:**
 ```bash
 python -m src.apps.main status
 ```
 
-### Run with specific symbol:
+**Test scenarios:**
 ```bash
-python -m src.apps.main run --symbol BTCUSDT
+# Test inventory limit enforcement
+python scripts/test_scenarios.py inventory
+
+# Test kill switch trigger
+python scripts/test_scenarios.py killswitch
+
+# Test order limit enforcement
+python scripts/test_scenarios.py orders
+```
+
+**Environment check:**
+```bash
+python scripts/check_env.py
 ```
 
 ## Testing
@@ -88,6 +112,7 @@ pytest -m integration -v
 - [Strategy Design (FAZ 2)](docs/STRATEGY_DESIGN.md) - Strateji tasarım sözleşmesi (V1 PMM, V2 AS), parametreler, risk kuralları, PnL modelleri
 - [Architecture & Development Order](docs/ARCHITECTURE.md) - Mimari tasarım, modül yapısı, geliştirme sırası, veri akışı
 - [Development Phases (FAZ 3-6)](docs/DEVELOPMENT_PHASES.md) - Sistem mimarisi, strateji motoru, risk katmanı, backtest altyapısı
+- [Testing Guide](docs/TESTING_GUIDE.md) - Sistematik test ve kalibrasyon rehberi
 
 ## Branch Strategy
 

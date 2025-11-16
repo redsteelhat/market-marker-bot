@@ -97,6 +97,15 @@ class OrderBookManager:
         self.snapshot.timestamp = datetime.utcnow()
         self.last_update = datetime.utcnow()
 
+    def update_from_snapshot(self, snapshot: OrderBookSnapshot) -> None:
+        """Update order book from snapshot.
+
+        Args:
+            snapshot: Order book snapshot
+        """
+        self.snapshot = snapshot
+        self.last_update = snapshot.timestamp
+
     def get_best_bid(self) -> Optional[Decimal]:
         """Get best bid price.
 

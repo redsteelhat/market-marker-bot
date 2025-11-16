@@ -26,6 +26,7 @@ from src.execution.simulated_exchange import SimulatedExchangeClient
 from src.risk.guardian import RiskGuardian
 from src.strategy.market_maker import MarketMaker
 from src.apps.paper_trading import run_paper_trading
+from src.monitoring.metrics import collect_snapshot, MetricsCollector
 
 # Setup logging
 logging.basicConfig(
@@ -79,8 +80,52 @@ def run(
             console.print("[yellow]Mode: Dry Run (No Orders)[/yellow]")
             asyncio.run(_run_bot(settings, dry_run=True))
         elif settings.trading_mode == TradingMode.BACKTEST:
-            console.print("[cyan]Mode: Backtest (Not implemented yet)[/cyan]")
-            console.print("[yellow]Backtest mode not yet implemented[/yellow]")
+            console.print("[cyan]Mode: Backtest[/cyan]")
+            from src.backtest.engine import BacktestEngine
+            from datetime import datetime
+            
+            engine = BacktestEngine(settings)
+            symbol = settings.symbols[0] if settings.symbols else "BTCUSDT"
+            
+            # Parse dates from config or use defaults
+            start_date = None
+            end_date = None
+            # TODO: Add date parsing from config or CLI args
+            
+            try:
+                results = asyncio.run(engine.run(symbol, start_date, end_date))
+                
+                # Display results
+                results_table = Table(title="Backtest Results", show_header=True)
+                results_table.add_column("Metric", style="cyan")
+                results_table.add_column("Value", style="magenta")
+                
+                results_table.add_row("Symbol", results["symbol"])
+                results_table.add_row("Snapshots Processed", str(results["snapshots_processed"]))
+                results_table.add_row("Initial Equity", f"{results['initial_equity']:.2f} USDT")
+                results_table.add_row("Final Equity", f"{results['final_equity']:.2f} USDT")
+                results_table.add_row("Total PnL", f"{results['total_pnl']:+.2f} USDT")
+                results_table.add_row("Realized PnL", f"{results['realized_pnl']:+.2f} USDT")
+                results_table.add_row("Unrealized PnL", f"{results['unrealized_pnl']:+.2f} USDT")
+                results_table.add_row("Total Trades", str(results["total_trades"]))
+                
+                if results["max_drawdown"] > 0:
+                    results_table.add_row("Max Drawdown", f"{results['max_drawdown']:.2f} USDT ({results['max_drawdown_pct']:.2f}%)")
+                
+                if results["sharpe_ratio"]:
+                    results_table.add_row("Sharpe Ratio", f"{results['sharpe_ratio']:.2f}")
+                
+                if results["kill_switch_triggered"]:
+                    results_table.add_row("Kill Switch", "[red]TRIGGERED[/red]")
+                
+                console.print(results_table)
+            except FileNotFoundError as e:
+                console.print(f"[red]Backtest data not found: {e}[/red]")
+                console.print("[yellow]Please provide historical data in data/backtest/ directory[/yellow]")
+                console.print("[dim]Expected format: {SYMBOL}_orderbook.csv with columns: timestamp,bid_price,bid_size,ask_price,ask_size[/dim]")
+            except Exception as e:
+                console.print(f"[red]Backtest error: {e}[/red]")
+                logger.exception("Backtest error")
         else:
             console.print(f"[red]Unknown mode: {settings.trading_mode}[/red]")
             sys.exit(1)
@@ -95,31 +140,32 @@ def run(
 
 @app.command()
 def status():
-    """Show bot status."""
-    console.print(Panel.fit("📊 Market Maker Bot Status", style="bold blue"))
+    """Show bot status with detailed metrics."""
+    console.print(Panel.fit("Market Maker Bot Status", style="bold blue"))
     
     try:
         settings = Settings.from_env()
         
-        # Create table
-        table = Table(title="Configuration")
-        table.add_column("Setting", style="cyan")
-        table.add_column("Value", style="magenta")
+        # Configuration table
+        config_table = Table(title="Configuration", show_header=True)
+        config_table.add_column("Setting", style="cyan")
+        config_table.add_column("Value", style="magenta")
         
-        table.add_row("Bot Equity", f"{settings.bot_equity_usdt} USDT")
-        table.add_row("Environment", settings.environment)
-        table.add_row("Testnet", "Yes" if settings.exchange_testnet else "No")
-        table.add_row("Symbols", ", ".join(settings.symbols))
-        table.add_row("Base Spread", f"{settings.strategy.base_spread_bps} bps")
-        table.add_row("Refresh Interval", f"{settings.strategy.refresh_interval_ms} ms")
-        table.add_row("Daily Loss Limit", f"{settings.risk.daily_loss_limit_pct * 100}%")
-        table.add_row("Max Drawdown (Hard)", f"{settings.risk.max_drawdown_hard_pct * 100}%")
+        config_table.add_row("Bot Equity", f"{settings.bot_equity_usdt} USDT")
+        config_table.add_row("Trading Mode", settings.trading_mode.value)
+        config_table.add_row("Environment", settings.environment)
+        config_table.add_row("Testnet", "Yes" if settings.exchange.testnet else "No")
+        config_table.add_row("Symbols", ", ".join(settings.symbols))
+        config_table.add_row("Base Spread", f"{settings.strategy.base_spread_bps} bps")
+        config_table.add_row("Refresh Interval", f"{settings.strategy.refresh_interval_ms} ms")
+        config_table.add_row("Daily Loss Limit", f"{settings.risk.daily_loss_limit_pct * 100}%")
+        config_table.add_row("Max Drawdown (Hard)", f"{settings.risk.max_drawdown_hard_pct * 100}%")
         
-        console.print(table)
+        console.print(config_table)
         
-        # Try to connect and show market data
-        console.print("\n[bold]Market Data:[/bold]")
-        asyncio.run(_show_market_status(settings))
+        # Try to get runtime status if bot is running
+        console.print("\n[bold]Runtime Status:[/bold]")
+        asyncio.run(_show_runtime_status(settings))
         
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
@@ -227,6 +273,143 @@ async def _run_bot(settings: Settings, dry_run: bool = False):
     
     finally:
         await client.close()
+
+
+async def _show_runtime_status(settings: Settings):
+    """Show runtime status with detailed metrics."""
+    from decimal import Decimal
+    from src.data.binance_public_client import BinancePublicClient
+    from src.execution.simulated_exchange import SimulatedExchangeClient
+    from src.risk.guardian import RiskGuardian
+    
+    try:
+        # Try to get status from simulated exchange (if paper trading was active)
+        public_client = BinancePublicClient()
+        simulated_exchange = SimulatedExchangeClient(
+            initial_equity=Decimal(str(settings.bot_equity_usdt))
+        )
+        risk_guardian = RiskGuardian(settings.risk, Decimal(str(settings.bot_equity_usdt)))
+        
+        # Get current state
+        positions = await simulated_exchange.get_positions()
+        open_orders = await simulated_exchange.get_open_orders()
+        trades = await simulated_exchange.get_trades(limit=100)
+        
+        # Collect snapshot
+        snapshot = await collect_snapshot(
+            exchange=simulated_exchange,
+            risk_guardian=risk_guardian,
+            positions=positions,
+            open_orders=open_orders,
+            trades=trades,
+            initial_equity=Decimal(str(settings.bot_equity_usdt)),
+        )
+        
+        # Display metrics
+        metrics_table = Table(title="Performance Metrics", show_header=True)
+        metrics_table.add_column("Metric", style="cyan")
+        metrics_table.add_column("Value", style="magenta")
+        
+        metrics_table.add_row("Equity", f"{snapshot.equity:.2f} USDT")
+        metrics_table.add_row("Total PnL", f"{snapshot.total_pnl:.2f} USDT")
+        metrics_table.add_row("Realized PnL", f"{snapshot.realized_pnl:.2f} USDT")
+        metrics_table.add_row("Unrealized PnL", f"{snapshot.unrealized_pnl:.2f} USDT")
+        metrics_table.add_row("Daily PnL", f"{snapshot.daily_pnl:.2f} USDT")
+        
+        if snapshot.max_drawdown_pct > 0:
+            metrics_table.add_row("Max Drawdown", f"{snapshot.max_drawdown:.2f} USDT ({snapshot.max_drawdown_pct:.2f}%)")
+        
+        if snapshot.sharpe_ratio:
+            metrics_table.add_row("Sharpe Ratio (24h)", f"{snapshot.sharpe_ratio:.2f}")
+        
+        console.print(metrics_table)
+        
+        # Positions
+        if positions:
+            pos_table = Table(title="Open Positions", show_header=True)
+            pos_table.add_column("Symbol", style="cyan")
+            pos_table.add_column("Quantity", style="magenta")
+            pos_table.add_column("Entry Price", style="yellow")
+            pos_table.add_column("Mark Price", style="yellow")
+            pos_table.add_column("PnL", style="green" if snapshot.unrealized_pnl >= 0 else "red")
+            
+            for pos in positions:
+                pos_table.add_row(
+                    pos.symbol,
+                    f"{pos.quantity:.6f}",
+                    f"{pos.entry_price:.2f}" if pos.entry_price else "N/A",
+                    f"{pos.mark_price:.2f}" if pos.mark_price else "N/A",
+                    f"{pos.unrealized_pnl:.2f} USDT",
+                )
+            
+            console.print(pos_table)
+        
+        # Orders
+        if open_orders:
+            orders_table = Table(title="Open Orders", show_header=True)
+            orders_table.add_column("Symbol", style="cyan")
+            orders_table.add_column("Side", style="magenta")
+            orders_table.add_column("Quantity", style="yellow")
+            orders_table.add_column("Price", style="yellow")
+            orders_table.add_column("Status", style="green")
+            
+            for order in open_orders[:10]:  # Show first 10
+                orders_table.add_row(
+                    order.symbol,
+                    order.side.value,
+                    f"{order.quantity:.6f}",
+                    f"{order.price:.2f}" if order.price else "N/A",
+                    order.status.value,
+                )
+            
+            if len(open_orders) > 10:
+                orders_table.add_row("...", f"{len(open_orders) - 10} more orders", "", "", "")
+            
+            console.print(orders_table)
+        
+        # Trading stats
+        stats_table = Table(title="Trading Statistics", show_header=True)
+        stats_table.add_column("Metric", style="cyan")
+        stats_table.add_column("Value", style="magenta")
+        
+        stats_table.add_row("Total Trades", str(snapshot.total_trades))
+        stats_table.add_row("Trades Today", str(snapshot.trades_today))
+        stats_table.add_row("Open Orders", str(snapshot.open_orders_count))
+        
+        if snapshot.cancel_to_trade_ratio:
+            stats_table.add_row("Cancel/Trade Ratio", f"{snapshot.cancel_to_trade_ratio:.2f}")
+        
+        console.print(stats_table)
+        
+        # Kill switch status
+        if snapshot.kill_switch_active:
+            console.print(f"\n[bold red]KILL SWITCH ACTIVE: {snapshot.kill_switch_reason}[/bold red]")
+        else:
+            console.print("\n[bold green]System Status: OK[/bold green]")
+        
+        # Market data
+        symbol = settings.symbols[0] if settings.symbols else "BTCUSDT"
+        try:
+            orderbook = await public_client.get_orderbook(symbol, limit=5)
+            
+            market_table = Table(title=f"Market Data - {symbol}", show_header=True)
+            market_table.add_column("Metric", style="cyan")
+            market_table.add_column("Value", style="magenta")
+            
+            market_table.add_row("Best Bid", f"{orderbook.best_bid}")
+            market_table.add_row("Best Ask", f"{orderbook.best_ask}")
+            market_table.add_row("Mid Price", f"{orderbook.mid_price}")
+            market_table.add_row("Spread", f"{orderbook.spread_bps:.2f} bps")
+            
+            console.print(market_table)
+        except Exception as e:
+            console.print(f"[yellow]Could not fetch market data: {e}[/yellow]")
+        
+        await public_client.close()
+        
+    except Exception as e:
+        console.print(f"[yellow]Bot not running or could not get status: {e}[/yellow]")
+        console.print("[dim]Start the bot with 'python -m src.apps.main run' to see runtime metrics[/dim]")
 
 
 async def _show_market_status(settings: Settings):

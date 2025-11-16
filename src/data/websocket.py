@@ -44,6 +44,7 @@ class BinanceWebSocketClient:
         self.running = False
         self.reconnect_task: Optional[asyncio.Task] = None
         self.heartbeat_task: Optional[asyncio.Task] = None
+        self.current_stream: Optional[str] = None
 
     async def connect(self, stream: str) -> None:
         """Connect to WebSocket stream.
@@ -51,11 +52,12 @@ class BinanceWebSocketClient:
         Args:
             stream: Stream name (e.g., 'btcusdt@depth20@100ms')
         """
+        self.current_stream = stream
         url = f"{self.ws_url}/ws/{stream}"
         logger.info(f"Connecting to WebSocket: {url}")
 
         try:
-            self.ws = await websockets.connect(url)
+            self.ws = await websockets.connect(url, ping_interval=20, ping_timeout=10)
             self.running = True
             logger.info("WebSocket connected successfully")
 
@@ -68,28 +70,69 @@ class BinanceWebSocketClient:
             logger.error(f"WebSocket connection error: {e}")
             if self.on_error:
                 self.on_error(e)
+            self.ws = None
             raise
 
     async def _receive_loop(self) -> None:
-        """Receive messages from WebSocket."""
-        while self.running and self.ws:
+        """Receive messages from WebSocket with automatic reconnection."""
+        reconnect_attempts = 0
+        max_reconnect_attempts = 10
+        
+        while self.running:
             try:
-                message = await self.ws.recv()
-                data = json.loads(message)
-                if self.on_message:
-                    self.on_message(data)
-            except websockets.exceptions.ConnectionClosed:
-                logger.warning("WebSocket connection closed")
-                if self.running:
-                    await self._reconnect()
-                break
+                if not self.ws:
+                    if reconnect_attempts >= max_reconnect_attempts:
+                        logger.error(f"Max reconnect attempts ({max_reconnect_attempts}) reached. Stopping.")
+                        self.running = False
+                        break
+                    reconnect_attempts += 1
+                    logger.warning(f"WebSocket disconnected. Reconnecting (attempt {reconnect_attempts}/{max_reconnect_attempts})...")
+                    await asyncio.sleep(self.reconnect_interval)
+                    # Try to reconnect
+                    if self.current_stream:
+                        try:
+                            url = f"{self.ws_url}/ws/{self.current_stream}"
+                            self.ws = await websockets.connect(url, ping_interval=20, ping_timeout=10)
+                            logger.info("WebSocket reconnected successfully")
+                            reconnect_attempts = 0
+                        except Exception as reconnect_error:
+                            logger.error(f"Reconnection failed: {reconnect_error}")
+                            self.ws = None
+                    continue
+                
+                try:
+                    message = await asyncio.wait_for(self.ws.recv(), timeout=60.0)
+                    reconnect_attempts = 0  # Reset on successful message
+                    data = json.loads(message)
+                    if self.on_message:
+                        self.on_message(data)
+                except asyncio.TimeoutError:
+                    logger.warning("WebSocket receive timeout. Sending ping...")
+                    if self.ws:
+                        try:
+                            await self.ws.ping()
+                        except Exception:
+                            self.ws = None
+                except websockets.exceptions.ConnectionClosed:
+                    logger.warning("WebSocket connection closed")
+                    self.ws = None
+                    if self.running:
+                        await asyncio.sleep(self.reconnect_interval)
+                except json.JSONDecodeError as e:
+                    logger.error(f"JSON decode error: {e}")
+                    continue
+                except Exception as e:
+                    logger.error(f"Error receiving message: {e}")
+                    if self.on_error:
+                        self.on_error(e)
+                    self.ws = None
+                    if self.running:
+                        await asyncio.sleep(self.reconnect_interval)
             except Exception as e:
-                logger.error(f"Error receiving message: {e}")
+                logger.error(f"Critical error in receive loop: {e}")
                 if self.on_error:
                     self.on_error(e)
-                if self.running:
-                    await self._reconnect()
-                break
+                await asyncio.sleep(self.reconnect_interval)
 
     async def _heartbeat_loop(self) -> None:
         """Send periodic heartbeat/ping."""

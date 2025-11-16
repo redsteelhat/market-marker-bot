@@ -214,6 +214,9 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = Field("INFO", description="Logging level")
     log_file: Optional[str] = Field(None, description="Log file path")
+    
+    # Backtest
+    backtest_data_path: str = Field("data/backtest", description="Path to backtest data directory")
 
     @classmethod
     def from_env(cls) -> "Settings":
