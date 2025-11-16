@@ -16,13 +16,16 @@ from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 
-from src.core.config import Settings
+from src.core.config import Settings, TradingMode
 from src.core.models import PnLState
 from src.data.binance_client import BinanceClient
+from src.data.binance_public_client import BinancePublicClient
 from src.data.orderbook import OrderBookManager
 from src.execution.order_manager import OrderManager
+from src.execution.simulated_exchange import SimulatedExchangeClient
 from src.risk.guardian import RiskGuardian
 from src.strategy.market_maker import MarketMaker
+from src.apps.paper_trading import run_paper_trading
 
 # Setup logging
 logging.basicConfig(
@@ -37,16 +40,22 @@ console = Console()
 
 @app.command()
 def run(
-    config: Optional[str] = typer.Option(None, "--config", "-c", help="Config file path"),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Dry run mode (no real orders)"),
+    mode: str = typer.Option("paper_exchange", "--mode", "-m", help="Trading mode: live|paper_exchange|dry_run|backtest"),
     symbol: Optional[str] = typer.Option(None, "--symbol", "-s", help="Trading symbol (e.g., BTCUSDT)"),
 ):
     """Run the market maker bot."""
-    console.print(Panel.fit("🚀 Starting Market Maker Bot", style="bold green"))
+    console.print(Panel.fit("Starting Market Maker Bot", style="bold green"))
     
     try:
         # Load settings
         settings = Settings.from_env()
+        
+        # Override trading mode
+        try:
+            settings.trading_mode = TradingMode(mode)
+        except ValueError:
+            console.print(f"[red]Invalid mode: {mode}. Use: live, paper_exchange, dry_run, or backtest[/red]")
+            sys.exit(1)
         
         if symbol:
             settings.symbols = [symbol]
@@ -55,16 +64,26 @@ def run(
             console.print("[red]Error: No symbols configured. Use --symbol or set in config.[/red]")
             sys.exit(1)
         
-        # Check API credentials
-        if not settings.exchange_api_key or not settings.exchange_api_secret:
-            console.print("[yellow]Warning: API credentials not found. Using testnet mode.[/yellow]")
-            settings.exchange_testnet = True
-        
-        if dry_run:
-            console.print("[yellow]⚠️  DRY RUN MODE: No real orders will be sent[/yellow]")
-        
-        # Run bot
-        asyncio.run(_run_bot(settings, dry_run))
+        # Run based on mode
+        if settings.trading_mode == TradingMode.PAPER_EXCHANGE:
+            console.print("[green]Mode: Paper Exchange (Live Data + Local Simulation)[/green]")
+            asyncio.run(run_paper_trading(settings))
+        elif settings.trading_mode == TradingMode.LIVE:
+            console.print("[yellow]Mode: Live Trading (Real Orders)[/yellow]")
+            # Check API credentials
+            if not settings.exchange.api_key or not settings.exchange.api_secret:
+                console.print("[red]Error: API credentials required for live trading[/red]")
+                sys.exit(1)
+            asyncio.run(_run_bot(settings))
+        elif settings.trading_mode == TradingMode.DRY_RUN:
+            console.print("[yellow]Mode: Dry Run (No Orders)[/yellow]")
+            asyncio.run(_run_bot(settings, dry_run=True))
+        elif settings.trading_mode == TradingMode.BACKTEST:
+            console.print("[cyan]Mode: Backtest (Not implemented yet)[/cyan]")
+            console.print("[yellow]Backtest mode not yet implemented[/yellow]")
+        else:
+            console.print(f"[red]Unknown mode: {settings.trading_mode}[/red]")
+            sys.exit(1)
         
     except KeyboardInterrupt:
         console.print("\n[yellow]Bot stopped by user[/yellow]")
@@ -117,6 +136,7 @@ def stop():
 
 
 async def _run_bot(settings: Settings, dry_run: bool = False):
+    """Run bot in live mode (for future Binance TR integration)."""
     """Run the market maker bot."""
     from decimal import Decimal
     
@@ -166,7 +186,7 @@ async def _run_bot(settings: Settings, dry_run: bool = False):
             # Create market maker
             mm = MarketMaker(
                 settings=settings,
-                order_manager=order_manager,
+                exchange=client,
                 risk_guardian=risk_guardian,
                 symbol=symbol,
                 orderbook_manager=ob_manager,

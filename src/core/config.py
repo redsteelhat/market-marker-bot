@@ -4,9 +4,19 @@ This module handles loading configuration from environment variables
 and provides type-safe configuration objects.
 """
 
+from enum import Enum
 from typing import Optional
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class TradingMode(str, Enum):
+    """Trading mode enumeration."""
+
+    LIVE = "live"  # Real orders, real exchange
+    PAPER_EXCHANGE = "paper_exchange"  # Local paper trading with live data
+    DRY_RUN = "dry_run"  # No orders sent, logging only
+    BACKTEST = "backtest"  # Offline backtest only
 
 
 class ExchangeConfig(BaseModel):
@@ -128,7 +138,22 @@ class Settings(BaseSettings):
     binance_futures_ws_market_testnet: str = Field("wss://fstream.binancefuture.com", description="Binance Futures testnet WS market URL")
     
     # Trading mode
-    trading_mode: str = Field("paper", description="Trading mode: live|paper|dry-run|backtest")
+    trading_mode: TradingMode = Field(
+        TradingMode.PAPER_EXCHANGE, description="Trading mode: live|paper_exchange|dry_run|backtest"
+    )
+    
+    @field_validator("trading_mode", mode="before")
+    @classmethod
+    def normalize_trading_mode(cls, v):
+        """Normalize trading mode (handle legacy 'paper' -> 'paper_exchange')."""
+        if isinstance(v, str):
+            if v == "paper":
+                return TradingMode.PAPER_EXCHANGE
+            try:
+                return TradingMode(v)
+            except ValueError:
+                return TradingMode.PAPER_EXCHANGE
+        return v
     
     # Default symbols
     default_symbols: str = Field("BTCUSDT,ETHUSDT", description="Default symbols (comma-separated)")

@@ -9,7 +9,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Dict, List, Optional
 from src.core.models import Order, OrderSide, OrderType, OrderStatus
-from src.data.binance_client import BinanceClient
+from src.core.exchange import IExchangeClient
 
 logger = logging.getLogger(__name__)
 
@@ -17,11 +17,11 @@ logger = logging.getLogger(__name__)
 class OrderManager:
     """Manages order lifecycle and synchronization."""
 
-    def __init__(self, client: BinanceClient):
+    def __init__(self, client: IExchangeClient):
         """Initialize order manager.
 
         Args:
-            client: Binance API client
+            client: Exchange client (real or simulated)
         """
         self.client = client
         self.open_orders: Dict[str, Order] = {}  # order_id -> Order
@@ -111,30 +111,26 @@ class OrderManager:
             Number of orders canceled
         """
         try:
+            count = await self.client.cancel_all_orders(symbol)
+            
+            # Remove from open orders
             if symbol:
-                # Cancel all orders for a specific symbol
-                response = await self.client.cancel_all_orders(symbol)
-                # Remove from open orders
                 canceled = [
                     order_id
                     for order_id, order in self.open_orders.items()
                     if order.symbol == symbol
                 ]
-                for order_id in canceled:
-                    if order_id in self.open_orders:
-                        order = self.open_orders[order_id]
-                        order.status = OrderStatus.CANCELED
-                        order.update_time = datetime.utcnow()
-                        del self.open_orders[order_id]
-                return len(canceled)
             else:
-                # Cancel all orders for all symbols
-                symbols = set(order.symbol for order in self.open_orders.values())
-                total_canceled = 0
-                for sym in symbols:
-                    canceled = await self.cancel_all_orders(sym)
-                    total_canceled += canceled
-                return total_canceled
+                canceled = list(self.open_orders.keys())
+            
+            for order_id in canceled:
+                if order_id in self.open_orders:
+                    order = self.open_orders[order_id]
+                    order.status = OrderStatus.CANCELED
+                    order.update_time = datetime.utcnow()
+                    del self.open_orders[order_id]
+            
+            return count
         except Exception as e:
             logger.error(f"Error canceling all orders: {e}")
             return 0
@@ -147,23 +143,25 @@ class OrderManager:
         """
         try:
             exchange_orders = await self.client.get_open_orders(symbol)
-            exchange_order_ids = set()
+            exchange_order_ids = {order.order_id for order in exchange_orders if order.order_id}
 
             # Update existing orders and add new ones
-            for ex_order_data in exchange_orders:
-                order = self._parse_order_response(ex_order_data)
-                exchange_order_ids.add(order.order_id)
+            for ex_order in exchange_orders:
+                if not ex_order.order_id:
+                    continue
+                    
+                exchange_order_ids.add(ex_order.order_id)
 
-                if order.order_id in self.open_orders:
+                if ex_order.order_id in self.open_orders:
                     # Update existing order
-                    existing = self.open_orders[order.order_id]
-                    existing.status = order.status
-                    existing.filled_quantity = order.filled_quantity
-                    existing.filled_price = order.filled_price
-                    existing.update_time = order.update_time
+                    existing = self.open_orders[ex_order.order_id]
+                    existing.status = ex_order.status
+                    existing.filled_quantity = ex_order.filled_quantity
+                    existing.filled_price = ex_order.filled_price
+                    existing.update_time = ex_order.update_time
                 else:
                     # New order (shouldn't happen, but handle it)
-                    self.open_orders[order.order_id] = order
+                    self.open_orders[ex_order.order_id] = ex_order
 
             # Remove orders that are no longer open
             to_remove = [

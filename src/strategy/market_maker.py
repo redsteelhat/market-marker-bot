@@ -9,6 +9,7 @@ from decimal import Decimal
 from typing import Callable, Optional
 from src.core.models import Order, OrderBookSnapshot, Position, Quote
 from src.core.config import Settings
+from src.core.exchange import IExchangeClient
 from src.data.orderbook import OrderBookManager
 from src.execution.order_manager import OrderManager
 from src.risk.guardian import RiskGuardian
@@ -24,7 +25,7 @@ class MarketMaker:
     def __init__(
         self,
         settings: Settings,
-        order_manager: OrderManager,
+        exchange: IExchangeClient,
         risk_guardian: RiskGuardian,
         symbol: str,
         orderbook_manager: OrderBookManager,
@@ -33,13 +34,14 @@ class MarketMaker:
 
         Args:
             settings: Application settings
-            order_manager: Order manager
+            exchange: Exchange client (real or simulated)
             risk_guardian: Risk guardian
             symbol: Trading symbol
             orderbook_manager: Order book manager
         """
         self.settings = settings
-        self.order_manager = order_manager
+        self.exchange = exchange
+        self.order_manager = OrderManager(exchange)
         self.risk_guardian = risk_guardian
         self.symbol = symbol
         self.orderbook_manager = orderbook_manager
