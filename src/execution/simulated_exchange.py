@@ -344,6 +344,21 @@ class SimulatedExchangeClient(IExchangeClient):
             p.realized_pnl + p.unrealized_pnl for p in self.positions.values()
         )
 
+        # Log new position state for visibility
+        try:
+            logger.info(
+                "Position updated: %s qty=%s entry=%s mark=%s uPnL=%s rPnL=%s equity=%s",
+                position.symbol,
+                position.quantity,
+                position.entry_price,
+                position.mark_price,
+                position.unrealized_pnl,
+                position.realized_pnl,
+                self.current_equity,
+            )
+        except Exception:
+            pass
+
     def get_equity(self) -> Decimal:
         """Get current equity.
 

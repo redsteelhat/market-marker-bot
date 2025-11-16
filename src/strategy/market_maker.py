@@ -62,6 +62,10 @@ class MarketMaker:
         self._last_risk_warning_at: dict[str, datetime] = {}
         self._risk_warning_throttle_seconds = 10
 
+        # Refresh control
+        self._last_refresh_at: Optional[datetime] = None
+        self._last_mid: Optional[Decimal] = None
+
     async def start(self) -> None:
         """Start market maker."""
         if self.running:
@@ -137,7 +141,32 @@ class MarketMaker:
                 # Log every 10 loops (every ~10 seconds)
                 if loop_count % 10 == 0:
                     logger.info(f"Quote loop running for {self.symbol} (loop #{loop_count})")
-                
+
+                # Time-based and price-drift-based refresh (cancel/replace)
+                now = datetime.utcnow()
+                snapshot = self.orderbook_manager.snapshot
+                mid = snapshot.mid_price if snapshot else None
+
+                force_refresh = False
+                # Time-based: every 5 seconds
+                if not self._last_refresh_at or (now - self._last_refresh_at).total_seconds() >= 5:
+                    force_refresh = True
+                # Price-drift based: 5 bps
+                if mid and self._last_mid:
+                    drift_bps = abs(mid - self._last_mid) / self._last_mid * Decimal("10000")
+                    if drift_bps >= Decimal("5"):
+                        force_refresh = True
+
+                if force_refresh:
+                    try:
+                        await self.order_manager.cancel_all_orders(self.symbol)
+                        self._last_refresh_at = now
+                        if mid:
+                            self._last_mid = mid
+                        logger.debug(f"Refreshed orders for {self.symbol} (force_refresh={force_refresh})")
+                    except Exception as e:
+                        logger.error(f"Error refreshing orders for {self.symbol}: {e}")
+
                 await self._update_quotes()
             except asyncio.CancelledError:
                 break
@@ -196,10 +225,10 @@ class MarketMaker:
         # Get current open orders
         open_orders = self.order_manager.get_open_orders(self.symbol)
         
-        # Calculate price change threshold (0.1% of mid price for BTC/ETH scale)
+        # Calculate price change threshold (5 bps of mid price)
         snapshot = self.orderbook_manager.snapshot
         if snapshot and snapshot.mid_price:
-            price_threshold = snapshot.mid_price * Decimal("0.001")  # 0.1% of mid
+            price_threshold = snapshot.mid_price * Decimal("0.0005")  # 5 bps
         else:
             price_threshold = Decimal("1.0")  # Fallback
 
@@ -238,10 +267,10 @@ class MarketMaker:
         Args:
             quote: Quote with bid price and size
         """
-        # Calculate price tolerance (0.1% of mid price)
+        # Calculate price tolerance (5 bps of mid price)
         snapshot = self.orderbook_manager.snapshot
         if snapshot and snapshot.mid_price:
-            price_tolerance = snapshot.mid_price * Decimal("0.001")  # 0.1% of mid
+            price_tolerance = snapshot.mid_price * Decimal("0.0005")  # 5 bps
         else:
             price_tolerance = Decimal("1.0")  # Fallback
         
@@ -302,10 +331,10 @@ class MarketMaker:
         Args:
             quote: Quote with ask price and size
         """
-        # Calculate price tolerance (0.1% of mid price)
+        # Calculate price tolerance (5 bps of mid price)
         snapshot = self.orderbook_manager.snapshot
         if snapshot and snapshot.mid_price:
-            price_tolerance = snapshot.mid_price * Decimal("0.001")  # 0.1% of mid
+            price_tolerance = snapshot.mid_price * Decimal("0.0005")  # 5 bps
         else:
             price_tolerance = Decimal("1.0")  # Fallback
         
