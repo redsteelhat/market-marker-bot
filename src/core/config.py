@@ -111,6 +111,7 @@ class RiskConfig(BaseModel):
     risk_scaling_min: float = Field(0.1, description="Minimum risk multiplier")
     risk_scaling_max: float = Field(2.0, description="Maximum risk multiplier")
     risk_off_threshold: float = Field(0.3, description="Risk multiplier threshold for risk-off mode")
+    base_notional_per_side: float = Field(10.0, description="Base notional per side in USDT (before risk scaling)")
 
 
 class Settings(BaseSettings):
@@ -207,7 +208,9 @@ class Settings(BaseSettings):
     risk: RiskConfig = Field(default_factory=RiskConfig)
 
     # Trading symbols (from DEFAULT_SYMBOLS env var or default)
-    symbols: list[str] = Field(default_factory=lambda: ["BTCUSDT", "ETHUSDT"])
+    # Note: In paper trading mode, symbols are now managed dynamically from dashboard
+    # This default is only used if no symbols are selected from dashboard
+    symbols: list[str] = Field(default_factory=lambda: [])  # Empty by default - user selects from dashboard
     
     @field_validator("symbols", mode="before")
     @classmethod

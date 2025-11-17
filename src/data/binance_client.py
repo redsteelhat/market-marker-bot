@@ -380,6 +380,58 @@ class BinanceClient(IExchangeClient):
                 )
         return None
 
+    async def get_account_balance(self) -> dict:
+        """Get account balance information.
+        
+        Returns:
+            Account balance data with available balance, total balance, etc.
+        """
+        auth_params = self._get_auth_params({})
+        response = await self.client.get(
+            "/fapi/v2/balance",
+            params=auth_params,
+        )
+        response.raise_for_status()
+        balances = response.json()
+        
+        # Find USDT balance
+        usdt_balance = None
+        for balance in balances:
+            if balance.get("asset") == "USDT":
+                usdt_balance = {
+                    "asset": "USDT",
+                    "available": float(balance.get("availableBalance", 0)),
+                    "total": float(balance.get("balance", 0)),
+                    "cross_wallet_balance": float(balance.get("crossWalletBalance", 0)),
+                }
+                break
+        
+        # Get account info for additional data
+        account_info = await self.get_account_info()
+        
+        return {
+            "usdt_balance": usdt_balance,
+            "total_wallet_balance": float(account_info.get("totalWalletBalance", 0)),
+            "total_unrealized_pnl": float(account_info.get("totalUnrealizedProfit", 0)),
+            "available_balance": float(account_info.get("availableBalance", 0)),
+            "margin_balance": float(account_info.get("marginBalance", 0)),
+            "all_balances": balances,
+        }
+    
+    async def get_account_info(self) -> dict:
+        """Get account information.
+        
+        Returns:
+            Account information including balances, positions, etc.
+        """
+        auth_params = self._get_auth_params({})
+        response = await self.client.get(
+            "/fapi/v2/account",
+            params=auth_params,
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def close(self) -> None:
         """Close HTTP client."""
         await self.client.aclose()

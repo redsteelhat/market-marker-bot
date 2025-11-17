@@ -31,6 +31,14 @@ from src.utils.logging import setup_logging
 
 # Setup logging (rich handler with symbol-safe format)
 setup_logging(level=logging.INFO)
+
+# Setup dashboard log handler after logging is configured
+try:
+    from src.apps.dashboard import setup_dashboard_log_handler
+    setup_dashboard_log_handler()
+except Exception:
+    pass  # Dashboard not needed for all commands
+
 logger = logging.getLogger(__name__)
 
 app = typer.Typer(help="Market Maker Bot CLI - run, monitor, and calibrate the market maker")
@@ -49,6 +57,8 @@ def run(
     log_level: str = typer.Option("INFO", "--log-level", help="Log level: DEBUG|INFO|WARNING|ERROR"),
     start_date: Optional[str] = typer.Option(None, "--start-date", help="Backtest start date (YYYY-MM-DD)"),
     end_date: Optional[str] = typer.Option(None, "--end-date", help="Backtest end date (YYYY-MM-DD)"),
+    enable_dashboard: bool = typer.Option(False, "--enable-dashboard", help="Start dashboard server in the same process"),
+    dashboard_port: int = typer.Option(8000, "--dashboard-port", help="Dashboard server port (if --enable-dashboard)"),
 ):
     """Run the market maker bot."""
     # Set log level early
@@ -93,7 +103,11 @@ def run(
         # Run based on mode
         if settings.trading_mode == TradingMode.PAPER_EXCHANGE:
             console.print("[green]Mode: Paper Exchange (Live Data + Local Simulation)[/green]")
-            asyncio.run(run_paper_trading(settings))
+            if enable_dashboard:
+                console.print(f"[cyan]Dashboard enabled on port {dashboard_port}[/cyan]")
+                asyncio.run(run_paper_trading(settings, enable_dashboard=True, dashboard_port=dashboard_port))
+            else:
+                asyncio.run(run_paper_trading(settings))
         elif settings.trading_mode == TradingMode.LIVE:
             console.print("[yellow]Mode: Live Trading (Real Orders)[/yellow]")
             # Check API credentials
@@ -137,7 +151,13 @@ def run(
                 console.print("[dim]No date range specified, loading all available data[/dim]")
             
             try:
-                results = asyncio.run(engine.run(symbol, start_date_parsed, end_date_parsed))
+                results = asyncio.run(engine.run(
+                    symbol, 
+                    start_date_parsed, 
+                    end_date_parsed,
+                    enable_dashboard=enable_dashboard,
+                    dashboard_port=dashboard_port,
+                ))
                 
                 # Display results
                 results_table = Table(title="Backtest Results", show_header=True)

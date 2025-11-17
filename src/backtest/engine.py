@@ -38,6 +38,8 @@ class BacktestEngine:
         symbol: str,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
+        enable_dashboard: bool = False,
+        dashboard_port: int = 8000,
     ) -> dict:
         """Run backtest.
 
@@ -45,6 +47,8 @@ class BacktestEngine:
             symbol: Trading symbol
             start_date: Start date for backtest
             end_date: End date for backtest
+            enable_dashboard: If True, start dashboard server during backtest
+            dashboard_port: Dashboard server port (if enable_dashboard is True)
 
         Returns:
             Backtest results dictionary
@@ -72,8 +76,90 @@ class BacktestEngine:
 
         await market_maker.start()
 
+        # Start dashboard if enabled
+        dashboard_thread = None
+        dashboard_update_task = None
+        if enable_dashboard:
+            try:
+                import threading
+                from src.apps.dashboard import create_app, update_dashboard_state, setup_dashboard_log_handler
+                import uvicorn
+                
+                # Setup dashboard log handler
+                setup_dashboard_log_handler()
+                
+                logger.info(f"Starting dashboard server on port {dashboard_port}...")
+                
+                # Create FastAPI app
+                app = create_app()
+                
+                # Start dashboard update loop
+                async def dashboard_update_loop():
+                    while True:
+                        try:
+                            await update_dashboard_state(
+                                exchange=simulated_exchange,
+                                risk_guardian=risk_guardian,
+                                settings=self.settings,
+                                risk_scaling_engines=None,  # Backtest doesn't use risk scaling
+                            )
+                        except Exception as e:
+                            logger.error(f"Error in dashboard update loop: {e}")
+                        await asyncio.sleep(1.0)
+                
+                # Start update loop as background task
+                dashboard_update_task = asyncio.create_task(dashboard_update_loop())
+                
+                # Start uvicorn server in a separate thread (blocking)
+                server_started = threading.Event()
+                server_error = [None]  # Use list to allow modification in nested function
+                
+                def run_server():
+                    try:
+                        import uvicorn
+                        # Create new event loop for this thread
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        
+                        config = uvicorn.Config(
+                            app, 
+                            host="127.0.0.1", 
+                            port=dashboard_port, 
+                            log_level="info",
+                            access_log=False  # Reduce noise
+                        )
+                        server = uvicorn.Server(config)
+                        
+                        # Signal that server is starting
+                        server_started.set()
+                        
+                        # Run server
+                        loop.run_until_complete(server.serve())
+                    except Exception as e:
+                        server_error[0] = e
+                        logger.error(f"Dashboard server error: {e}", exc_info=True)
+                        import traceback
+                        traceback.print_exc()
+                
+                dashboard_thread = threading.Thread(target=run_server, daemon=True)
+                dashboard_thread.start()
+                
+                # Wait for server to start (or error)
+                import time
+                if server_started.wait(timeout=3):
+                    if server_error[0]:
+                        logger.error(f"Dashboard server failed to start: {server_error[0]}")
+                    else:
+                        logger.info(f"Dashboard available at: http://127.0.0.1:{dashboard_port}")
+                else:
+                    logger.warning(f"Dashboard server may still be starting... Check http://127.0.0.1:{dashboard_port} in a few seconds")
+            except Exception as e:
+                logger.error(f"Could not start dashboard server: {e}")
+
         # Process historical data
         snapshot_count = 0
+        last_dashboard_update = 0
+        dashboard_update_interval = 100  # Update dashboard every 100 snapshots
         try:
             for snapshot in self.data_loader.load_orderbook_snapshots(symbol, start_date, end_date):
                 # Update order book
@@ -86,6 +172,11 @@ class BacktestEngine:
                 await market_maker.on_order_book_update(snapshot)
                 
                 snapshot_count += 1
+                
+                # Update dashboard periodically (more frequent than status logs)
+                if enable_dashboard and snapshot_count - last_dashboard_update >= dashboard_update_interval:
+                    last_dashboard_update = snapshot_count
+                    # Dashboard update loop will handle this automatically
                 
                 # Periodic status
                 if snapshot_count % 1000 == 0:
@@ -116,6 +207,14 @@ class BacktestEngine:
                         break
 
         finally:
+            # Stop dashboard update task if running
+            if dashboard_update_task:
+                dashboard_update_task.cancel()
+                try:
+                    await dashboard_update_task
+                except asyncio.CancelledError:
+                    pass
+            
             await market_maker.stop()
 
         # Collect final results

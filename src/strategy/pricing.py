@@ -65,9 +65,10 @@ class PricingEngine:
         bid_price = self._round_price(bid_price)
         ask_price = self._round_price(ask_price)
 
-        # Calculate order sizes (this should come from strategy config)
-        # For now, we'll use a simple fixed size
-        bid_size = Decimal("0.001")  # This should be calculated based on order_notional_pct
+        # Calculate order sizes (will be overridden by risk scaling in market_maker)
+        # Default sizes - these will be replaced by base_notional_per_side * risk_multiplier
+        # This is just a placeholder to ensure quote has valid sizes
+        bid_size = Decimal("0.001")
         ask_size = Decimal("0.001")
 
         return Quote(

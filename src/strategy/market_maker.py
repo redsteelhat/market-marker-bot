@@ -159,12 +159,25 @@ class MarketMaker:
         await self._update_quotes()
 
     async def _quote_loop(self) -> None:
-        """Periodic quote update loop."""
-        refresh_interval = self.settings.strategy.refresh_interval_ms / 1000.0
+        """Periodic quote update loop with risk-based frequency scaling."""
+        base_refresh_interval = self.settings.strategy.refresh_interval_ms / 1000.0
         loop_count = 0
 
         while self.running:
             try:
+                # Calculate dynamic refresh interval based on risk multiplier
+                refresh_interval = base_refresh_interval
+                if self.risk_scaling:
+                    # When risk is low (risk_mult < 1), quote less frequently
+                    # risk_mult = 1.0 → normal frequency
+                    # risk_mult = 0.1 → 3x slower (less frequent quotes)
+                    risk_mult = self.risk_scaling.current_multiplier
+                    if risk_mult < 1.0:
+                        # Inverse relationship: lower risk_mult → slower quotes
+                        frequency_multiplier = 1.0 + (1.0 - risk_mult) * 2.0  # 1.0 to 3.0 range
+                        refresh_interval = base_refresh_interval * frequency_multiplier
+                        logger.debug(f"Risk-based quote frequency: risk_mult={risk_mult:.3f}, frequency_mult={frequency_multiplier:.2f}, interval={refresh_interval:.2f}s")
+                
                 await asyncio.sleep(refresh_interval)
                 loop_count += 1
                 
@@ -178,8 +191,13 @@ class MarketMaker:
                 mid = snapshot.mid_price if snapshot else None
 
                 force_refresh = False
-                # Time-based: every 5 seconds
-                if not self._last_refresh_at or (now - self._last_refresh_at).total_seconds() >= 5:
+                # Time-based: every 5 seconds (or longer if risk is low)
+                time_threshold = 5.0
+                if self.risk_scaling and self.risk_scaling.current_multiplier < 1.0:
+                    # Scale time threshold with risk multiplier
+                    time_threshold = 5.0 * (1.0 + (1.0 - self.risk_scaling.current_multiplier) * 2.0)
+                
+                if not self._last_refresh_at or (now - self._last_refresh_at).total_seconds() >= time_threshold:
                     force_refresh = True
                 # Price-drift based: 5 bps
                 if mid and self._last_mid:
@@ -336,11 +354,24 @@ class MarketMaker:
             logger.error(f"Error computing quote: {e}")
             return
 
-        # Apply risk scaling to quote sizes
-        if self.risk_scaling and risk_multiplier != Decimal("1.0"):
-            quote.bid_size = quote.bid_size * risk_multiplier
-            quote.ask_size = quote.ask_size * risk_multiplier
-            logger.debug(f"Applied risk scaling: bid_size={quote.bid_size}, ask_size={quote.ask_size}, multiplier={risk_multiplier}")
+        # Apply risk scaling to quote sizes (base_notional_per_side * risk_multiplier)
+        if self.risk_scaling:
+            # Calculate base size from base_notional_per_side
+            base_notional = Decimal(str(self.settings.risk.base_notional_per_side))
+            if snapshot.mid_price and snapshot.mid_price > 0:
+                base_size = base_notional / snapshot.mid_price
+                # Apply risk multiplier to base size
+                quote.bid_size = base_size * risk_multiplier
+                quote.ask_size = base_size * risk_multiplier
+                logger.debug(
+                    f"Applied risk scaling: base_notional={base_notional}, base_size={base_size}, "
+                    f"risk_mult={risk_multiplier}, final_bid_size={quote.bid_size}, final_ask_size={quote.ask_size}"
+                )
+            else:
+                # Fallback: scale existing sizes
+                quote.bid_size = quote.bid_size * risk_multiplier
+                quote.ask_size = quote.ask_size * risk_multiplier
+                logger.debug(f"Applied risk scaling (fallback): bid_size={quote.bid_size}, ask_size={quote.ask_size}, multiplier={risk_multiplier}")
 
         # Apply risk scaling to spread (widen when risk is low)
         if self.risk_scaling and spread_multiplier != Decimal("1.0") and snapshot.mid_price:
@@ -358,22 +389,27 @@ class MarketMaker:
 
         # Risk-off mode: only reduce position, don't open new ones
         if is_risk_off:
-            # Only quote the side that reduces position
+            # In risk-off mode, we only quote to reduce existing positions
+            # Use more aggressive pricing to ensure fills (wider spread, better prices)
             if inventory_qty > 0:
                 # Long position: only quote ask (sell to reduce)
                 should_quote_bid = False
                 should_quote_ask = True
-                logger.debug(f"Risk-off mode: only quoting ask to reduce long position")
+                # Make ask price more attractive (lower) to encourage selling
+                quote.ask_price = quote.ask_price * Decimal("0.999")  # 0.1% more attractive
+                logger.info(f"Risk-off mode: only quoting ask to reduce long position (qty={inventory_qty}, price={quote.ask_price})")
             elif inventory_qty < 0:
                 # Short position: only quote bid (buy to reduce)
                 should_quote_bid = True
                 should_quote_ask = False
-                logger.debug(f"Risk-off mode: only quoting bid to reduce short position")
+                # Make bid price more attractive (higher) to encourage buying
+                quote.bid_price = quote.bid_price * Decimal("1.001")  # 0.1% more attractive
+                logger.info(f"Risk-off mode: only quoting bid to reduce short position (qty={inventory_qty}, price={quote.bid_price})")
             else:
                 # Flat position: don't quote at all
                 should_quote_bid = False
                 should_quote_ask = False
-                logger.debug(f"Risk-off mode: flat position, not quoting")
+                logger.info(f"Risk-off mode: flat position, not quoting (risk_mult={risk_multiplier:.3f})")
 
         # If degraded, widen spreads around mid and possibly one-side quote
         if self._degraded_active and snapshot and snapshot.mid_price:
@@ -488,11 +524,16 @@ class MarketMaker:
                 logger.debug(f"Already have BUY order at {quote.bid_price} for {self.symbol}, skipping")
                 return  # Already have order at this price
 
-        # Calculate order size
-        bot_equity = Decimal(str(self.settings.bot_equity_usdt))
-        size = self.pricing_engine.calculate_order_size(quote.bid_price, bot_equity)
+        # Use quote size (already scaled by risk multiplier)
+        # This ensures risk scaling is properly applied
+        size = quote.bid_size
         if self._degrade_size_multiplier:
             size = (size * self._degrade_size_multiplier).quantize(Decimal("0.00000001"))
+        
+        # Ensure minimum size
+        if size <= 0:
+            logger.debug(f"Bid size too small ({size}), skipping order")
+            return
 
         # Create order
         from src.core.models import OrderSide
@@ -554,11 +595,16 @@ class MarketMaker:
                 logger.debug(f"Already have SELL order at {quote.ask_price} for {self.symbol}, skipping")
                 return  # Already have order at this price
 
-        # Calculate order size
-        bot_equity = Decimal(str(self.settings.bot_equity_usdt))
-        size = self.pricing_engine.calculate_order_size(quote.ask_price, bot_equity)
+        # Use quote size (already scaled by risk multiplier)
+        # This ensures risk scaling is properly applied
+        size = quote.ask_size
         if self._degrade_size_multiplier:
             size = (size * self._degrade_size_multiplier).quantize(Decimal("0.00000001"))
+        
+        # Ensure minimum size
+        if size <= 0:
+            logger.debug(f"Ask size too small ({size}), skipping order")
+            return
 
         # Create order
         from src.core.models import OrderSide

@@ -142,8 +142,22 @@ class RiskScalingEngine:
         if not trs:
             return None
 
-        # Simple moving average of TRs (can be replaced with EMA)
-        atr = sum(trs) / Decimal(len(trs))
+        # Use EMA for ATR (TradingView compatible)
+        # First value is simple average, then EMA
+        if len(trs) == 1:
+            return trs[0]
+        
+        # Initial value: simple average of first period
+        initial_period = min(self.atr_length, len(trs))
+        atr = sum(trs[:initial_period]) / Decimal(initial_period)
+        
+        # EMA smoothing factor
+        alpha = Decimal("2") / Decimal(str(self.atr_length + 1))
+        
+        # Apply EMA to remaining TRs
+        for tr in trs[initial_period:]:
+            atr = alpha * tr + (Decimal("1") - alpha) * atr
+        
         return atr
 
     def compute_drawdown(self) -> float:

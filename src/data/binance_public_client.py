@@ -66,10 +66,19 @@ class BinancePublicClient(IExchangeClient):
         Returns:
             Ticker data
         """
-        response = await self.client.get(
-            "/api/v3/ticker/24hr",
-            params={"symbol": symbol},
-        )
+        # Check if this is Futures API (fapi.binance.com) or Spot API
+        if "fapi" in self.base_url:
+            # Futures API
+            response = await self.client.get(
+                "/fapi/v1/ticker/24hr",
+                params={"symbol": symbol},
+            )
+        else:
+            # Spot API
+            response = await self.client.get(
+                "/api/v3/ticker/24hr",
+                params={"symbol": symbol},
+            )
         response.raise_for_status()
         return response.json()
 
