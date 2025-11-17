@@ -16,6 +16,7 @@ from src.execution.order_manager import OrderManager
 from src.risk.guardian import RiskGuardian
 from src.strategy.pricing import PricingEngine
 from src.strategy.inventory import InventoryManager
+from src.strategy.signals import TradeSignal
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,7 @@ class MarketMaker:
         self._degraded_active: bool = False
         self._degraded_last_reason: Optional[str] = None
         self._degrade_size_multiplier: Optional[Decimal] = None
+        self._last_logged_signal: Optional[TradeSignal] = None
 
     async def start(self) -> None:
         """Start market maker."""
@@ -294,6 +296,21 @@ class MarketMaker:
             except Exception as e:
                 logger.error(f"Error applying degraded adjustments: {e}")
 
+        # Compute and log trade signal (visibility layer; does not alter execution directly)
+        try:
+            toxicity_state = "PAUSED" if self._is_paused else ("DEGRADED" if self._degraded_active else "NORMAL")
+            spread_bps = getattr(snapshot, "spread_bps", None)
+            signal = self._compute_trade_signal(
+                mid_price=snapshot.mid_price,
+                imbalance=imbalance if imbalance is not None else Decimal("0"),
+                spread_bps=Decimal(str(spread_bps)) if spread_bps is not None else None,
+                toxicity_state=toxicity_state,
+                inventory_qty=inventory_qty or Decimal("0"),
+            )
+            self._log_trade_signal(signal, snapshot.mid_price, imbalance, spread_bps, toxicity_state, inventory_qty)
+        except Exception as e:
+            logger.error(f"Error computing/logging trade signal: {e}")
+
         # Check if we should quote each side (post-adjustment)
 
         # Update orders
@@ -481,6 +498,83 @@ class MarketMaker:
             logger.info(f"Ask order submitted: {submitted_order.order_id} @ {quote.ask_price}")
         except Exception as e:
             logger.error(f"Error submitting ask order: {e}")
+
+    def _compute_trade_signal(
+        self,
+        mid_price: Decimal,
+        imbalance: Decimal,
+        spread_bps: Optional[Decimal],
+        toxicity_state: str,
+        inventory_qty: Decimal,
+    ) -> TradeSignal:
+        # 1) Never signal in hard toxic conditions
+        if toxicity_state == "PAUSED":
+            return TradeSignal.NONE
+
+        # 2) Require minimum spread
+        if spread_bps is not None and spread_bps < Decimal("3.0"):
+            return TradeSignal.NONE
+
+        # Entry/Exit thresholds (simple defaults, can be moved to config)
+        IMB_ENTRY = Decimal("0.75")
+        IMB_EXIT = Decimal("0.40")
+
+        # No position: directional entry based on imbalance
+        if abs(inventory_qty) < Decimal("0.00000001"):
+            if imbalance >= IMB_ENTRY:
+                return TradeSignal.ENTER_LONG
+            if imbalance <= -IMB_ENTRY:
+                return TradeSignal.ENTER_SHORT
+            return TradeSignal.NONE
+
+        # With position: exit if imbalance normalizes
+        if inventory_qty > 0:
+            if abs(imbalance) < IMB_EXIT:
+                return TradeSignal.EXIT_LONG
+        elif inventory_qty < 0:
+            if abs(imbalance) < IMB_EXIT:
+                return TradeSignal.EXIT_SHORT
+
+        return TradeSignal.NONE
+
+    def _log_trade_signal(
+        self,
+        signal: TradeSignal,
+        mid_price: Decimal,
+        imbalance: Optional[Decimal],
+        spread_bps: Optional[Decimal],
+        toxicity_state: str,
+        inventory_qty: Decimal,
+    ) -> None:
+        if signal == TradeSignal.NONE:
+            return
+
+        # Only log when signal changes to reduce noise
+        if signal == self._last_logged_signal:
+            return
+
+        tag = ""
+        if signal in (TradeSignal.ENTER_LONG, TradeSignal.EXIT_SHORT):
+            tag = "[bold green]LONG[/bold green]"
+        elif signal in (TradeSignal.ENTER_SHORT, TradeSignal.EXIT_LONG):
+            tag = "[bold red]SHORT[/bold red]"
+        else:
+            tag = "[bold yellow]FLAT[/bold yellow]"
+
+        logger.info(
+            (
+                "[SIGNAL] [cyan]%s[/cyan] %s | mid=%.2f spread=%sbps | imb=%s tox=%s inv=%.6f"
+            ),
+            self.symbol,
+            tag,
+            float(mid_price),
+            f"{spread_bps:.2f}" if spread_bps is not None else "N/A",
+            f"{imbalance:.2f}" if imbalance is not None else "N/A",
+            toxicity_state,
+            float(inventory_qty),
+            extra={"symbol": self.symbol},
+        )
+        self._last_logged_signal = signal
 
     def _log_risk_warning(self, key: str, message: str) -> None:
         """Log risk warning with throttling to avoid spam.
