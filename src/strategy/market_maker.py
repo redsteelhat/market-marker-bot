@@ -14,6 +14,7 @@ from src.core.exchange import IExchangeClient
 from src.data.orderbook import OrderBookManager
 from src.execution.order_manager import OrderManager
 from src.risk.guardian import RiskGuardian
+from src.risk.scaling import RiskScalingEngine
 from src.strategy.pricing import PricingEngine
 from src.strategy.inventory import InventoryManager
 from src.strategy.signals import TradeSignal
@@ -52,6 +53,22 @@ class MarketMaker:
         self.inventory_manager = InventoryManager(
             settings.strategy, Decimal(str(settings.bot_equity_usdt))
         )
+
+        # Risk scaling engine
+        if settings.risk.enable_risk_scaling:
+            self.risk_scaling = RiskScalingEngine(
+                atr_length=settings.risk.risk_scaling_atr_length,
+                dd_lookback_hours=settings.risk.risk_scaling_dd_lookback_hours,
+                vol_low=settings.risk.risk_scaling_vol_low,
+                vol_high=settings.risk.risk_scaling_vol_high,
+                dd_soft=settings.risk.risk_scaling_dd_soft,
+                dd_hard=settings.risk.risk_scaling_dd_hard,
+                risk_min=settings.risk.risk_scaling_min,
+                risk_max=settings.risk.risk_scaling_max,
+                initial_equity=Decimal(str(settings.bot_equity_usdt)),
+            )
+        else:
+            self.risk_scaling = None
 
         self.running = False
         self.quote_task: Optional[asyncio.Task] = None
@@ -205,6 +222,53 @@ class MarketMaker:
         # Get current inventory
         inventory_qty = self.inventory_manager.get_inventory_quantity(self.current_position)
 
+        # Update risk scaling engine with price and equity data
+        risk_multiplier = Decimal("1.0")
+        spread_multiplier = Decimal("1.0")
+        is_risk_off = False
+
+        if self.risk_scaling:
+            mid_price = snapshot.mid_price
+            best_bid = snapshot.best_bid
+            best_ask = snapshot.best_ask
+
+            # Update price series for ATR calculation
+            if best_bid and best_ask:
+                high = max(best_bid, best_ask, mid_price)
+                low = min(best_bid, best_ask, mid_price)
+                self.risk_scaling.update_price(high, low, mid_price)
+
+            # Update equity from exchange
+            try:
+                positions = await self.exchange.get_positions()
+                total_unrealized_pnl = sum(p.unrealized_pnl for p in positions if p.symbol == self.symbol)
+                current_equity = Decimal(str(self.settings.bot_equity_usdt)) + total_unrealized_pnl
+                # Also add realized PnL if available
+                if positions:
+                    for p in positions:
+                        if p.symbol == self.symbol:
+                            current_equity += p.realized_pnl
+                            break
+                self.risk_scaling.update_equity(current_equity)
+            except Exception as e:
+                logger.debug(f"Could not update equity for risk scaling: {e}")
+
+            # Compute risk multiplier
+            risk_mult = self.risk_scaling.compute_risk_multiplier(mid_price)
+            risk_multiplier = Decimal(str(risk_mult))
+            spread_multiplier = Decimal(str(self.risk_scaling.get_spread_multiplier()))
+            is_risk_off = self.risk_scaling.is_risk_off(threshold=self.settings.risk.risk_off_threshold)
+
+            # Log periodically (every 50 quote updates)
+            if not hasattr(self, '_risk_scaling_log_counter'):
+                self._risk_scaling_log_counter = 0
+            self._risk_scaling_log_counter += 1
+            if self._risk_scaling_log_counter % 50 == 0:
+                logger.info(
+                    f"Risk scaling for {self.symbol}: multiplier={risk_multiplier:.3f}, "
+                    f"spread_mult={spread_multiplier:.3f}, risk_off={is_risk_off}"
+                )
+
         # Calculate short-term volatility (bps) and depth metrics
         volatility_estimate = self.orderbook_manager.get_realized_volatility(n=30)
         depth_bid = self.orderbook_manager.get_depth_volume_bps("bid", Decimal("10"))  # within 10 bps
@@ -272,9 +336,46 @@ class MarketMaker:
             logger.error(f"Error computing quote: {e}")
             return
 
-        # If degraded, widen spreads around mid and possibly one-side quote
+        # Apply risk scaling to quote sizes
+        if self.risk_scaling and risk_multiplier != Decimal("1.0"):
+            quote.bid_size = quote.bid_size * risk_multiplier
+            quote.ask_size = quote.ask_size * risk_multiplier
+            logger.debug(f"Applied risk scaling: bid_size={quote.bid_size}, ask_size={quote.ask_size}, multiplier={risk_multiplier}")
+
+        # Apply risk scaling to spread (widen when risk is low)
+        if self.risk_scaling and spread_multiplier != Decimal("1.0") and snapshot.mid_price:
+            mid_price = snapshot.mid_price
+            current_spread = quote.ask_price - quote.bid_price
+            target_spread = current_spread * spread_multiplier
+            spread_adjustment = (target_spread - current_spread) / Decimal("2")
+            quote.bid_price = quote.bid_price - spread_adjustment
+            quote.ask_price = quote.ask_price + spread_adjustment
+            logger.debug(f"Applied spread scaling: spread_mult={spread_multiplier}, new_bid={quote.bid_price}, new_ask={quote.ask_price}")
+
+        # Determine which sides to quote (inventory-based)
         should_quote_bid = self.inventory_manager.should_quote_bid(self.current_position)
         should_quote_ask = self.inventory_manager.should_quote_ask(self.current_position)
+
+        # Risk-off mode: only reduce position, don't open new ones
+        if is_risk_off:
+            # Only quote the side that reduces position
+            if inventory_qty > 0:
+                # Long position: only quote ask (sell to reduce)
+                should_quote_bid = False
+                should_quote_ask = True
+                logger.debug(f"Risk-off mode: only quoting ask to reduce long position")
+            elif inventory_qty < 0:
+                # Short position: only quote bid (buy to reduce)
+                should_quote_bid = True
+                should_quote_ask = False
+                logger.debug(f"Risk-off mode: only quoting bid to reduce short position")
+            else:
+                # Flat position: don't quote at all
+                should_quote_bid = False
+                should_quote_ask = False
+                logger.debug(f"Risk-off mode: flat position, not quoting")
+
+        # If degraded, widen spreads around mid and possibly one-side quote
         if self._degraded_active and snapshot and snapshot.mid_price:
             widen_bps = Decimal("5")  # 5 bps widen on each side
             mid_price = snapshot.mid_price

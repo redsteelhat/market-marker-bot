@@ -100,6 +100,18 @@ class RiskConfig(BaseModel):
     enable_kill_switch: bool = Field(True, description="Enable kill switch mechanism")
     kill_switch_on_api_errors: bool = Field(True, description="Trigger kill switch on persistent API errors")
 
+    # Risk scaling (volatility and drawdown-based)
+    enable_risk_scaling: bool = Field(True, description="Enable risk scaling based on ATR and drawdown")
+    risk_scaling_atr_length: int = Field(14, description="ATR calculation period")
+    risk_scaling_dd_lookback_hours: int = Field(240, description="Drawdown lookback window in hours")
+    risk_scaling_vol_low: float = Field(0.5, description="Low volatility threshold (ATR multiplier)")
+    risk_scaling_vol_high: float = Field(2.0, description="High volatility threshold (ATR multiplier)")
+    risk_scaling_dd_soft: float = Field(0.05, description="Soft drawdown threshold (5% = 0.05)")
+    risk_scaling_dd_hard: float = Field(0.15, description="Hard drawdown threshold (15% = 0.15)")
+    risk_scaling_min: float = Field(0.1, description="Minimum risk multiplier")
+    risk_scaling_max: float = Field(2.0, description="Maximum risk multiplier")
+    risk_off_threshold: float = Field(0.3, description="Risk multiplier threshold for risk-off mode")
+
 
 class Settings(BaseSettings):
     """Main application settings."""
@@ -217,6 +229,8 @@ class Settings(BaseSettings):
     
     # Backtest
     backtest_data_path: str = Field("data/backtest", description="Path to backtest data directory")
+    backtest_start_date: Optional[str] = Field(None, description="Backtest start date (YYYY-MM-DD)")
+    backtest_end_date: Optional[str] = Field(None, description="Backtest end date (YYYY-MM-DD)")
 
     @classmethod
     def from_env(cls) -> "Settings":

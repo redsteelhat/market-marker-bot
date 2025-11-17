@@ -265,7 +265,7 @@ class SimulatedExchangeClient(IExchangeClient):
         await self._update_position(trade, snapshot)
 
     async def _update_position(self, trade: Trade, snapshot: OrderBookSnapshot) -> None:
-        """Update position based on trade.
+        """Update position based on trade using proper cost basis accounting.
 
         Args:
             trade: Trade that occurred
@@ -279,6 +279,7 @@ class SimulatedExchangeClient(IExchangeClient):
             self.positions[symbol] = Position(
                 symbol=symbol,
                 quantity=Decimal("0"),
+                cost=Decimal("0"),
                 entry_price=None,
                 mark_price=mark_price,
                 unrealized_pnl=Decimal("0"),
@@ -287,55 +288,82 @@ class SimulatedExchangeClient(IExchangeClient):
 
         position = self.positions[symbol]
 
-        # Update quantity
-        if trade.side == OrderSide.BUY:
-            new_quantity = position.quantity + trade.quantity
-        else:
-            new_quantity = position.quantity - trade.quantity
+        # Determine signed quantity change
+        # BUY adds to position (positive), SELL subtracts (negative)
+        signed_qty = trade.quantity if trade.side == OrderSide.BUY else -trade.quantity
+        signed_notional = trade.price * signed_qty  # Cost change (signed)
 
-        # Update entry price (weighted average)
-        if new_quantity != 0:
-            if position.entry_price is None:
-                new_entry_price = trade.price
-            else:
-                # Weighted average entry price
-                if trade.side == OrderSide.BUY:
-                    total_cost = (position.quantity * (position.entry_price or Decimal("0"))) + (trade.quantity * trade.price)
-                    new_entry_price = total_cost / new_quantity
-                else:
-                    # Selling - entry price stays same if we're reducing position
-                    new_entry_price = position.entry_price
-        else:
-            new_entry_price = None
+        old_quantity = position.quantity
+        old_cost = position.cost
+        # Calculate old entry price from cost/quantity
+        old_entry_price = (old_cost / old_quantity) if old_quantity != 0 else None
 
-        # Calculate realized PnL if position flipped or closed
+        # Determine if we're increasing, decreasing, closing, or flipping position
+        same_direction = (
+            old_quantity == 0
+            or (old_quantity > 0 and signed_qty > 0)
+            or (old_quantity < 0 and signed_qty < 0)
+        )
+
         realized_pnl = Decimal("0")
-        if position.quantity != 0 and new_quantity == 0:
-            # Position closed
-            if position.entry_price:
-                if position.quantity > 0:
-                    realized_pnl = (trade.price - position.entry_price) * abs(position.quantity)
-                else:
-                    realized_pnl = (position.entry_price - trade.price) * abs(position.quantity)
-        elif (position.quantity > 0 and new_quantity < 0) or (position.quantity < 0 and new_quantity > 0):
-            # Position flipped
-            if position.entry_price:
-                closed_qty = abs(position.quantity)
-                if position.quantity > 0:
-                    realized_pnl = (trade.price - position.entry_price) * closed_qty
-                else:
-                    realized_pnl = (position.entry_price - trade.price) * closed_qty
+
+        if same_direction:
+            # INCREASING POSITION (same direction or opening new)
+            # Simply add to cost and quantity
+            new_quantity = old_quantity + signed_qty
+            new_cost = old_cost + signed_notional
+        else:
+            # DECREASING, CLOSING, or FLIPPING POSITION
+            # Calculate realized PnL for the closed portion
+            close_qty = min(abs(old_quantity), abs(signed_qty))
+            
+            if old_entry_price is None:
+                # Should not happen, but handle gracefully
+                old_entry_price = trade.price
+            
+            # Calculate realized PnL
+            if old_quantity > 0:
+                # Closing long: (exit_price - entry_price) * quantity
+                realized_pnl = (trade.price - old_entry_price) * close_qty
+            else:
+                # Closing short: (entry_price - exit_price) * quantity
+                realized_pnl = (old_entry_price - trade.price) * close_qty
+            
+            # Update cost and quantity
+            new_quantity = old_quantity + signed_qty
+            
+            if new_quantity == 0:
+                # Position fully closed
+                new_cost = Decimal("0")
+            elif (old_quantity > 0 and new_quantity < 0) or (old_quantity < 0 and new_quantity > 0):
+                # Position flipped - new position starts with new cost
+                # The portion that flipped gets the new entry price
+                new_cost = signed_notional
+            else:
+                # Position partially closed (same direction)
+                # Remaining position keeps the old entry price
+                # Cost is proportional to remaining quantity
+                if old_entry_price is None:
+                    # Should not happen, but handle gracefully
+                    old_entry_price = trade.price
+                new_cost = old_entry_price * new_quantity
 
         # Update position
         position.quantity = new_quantity
-        position.entry_price = new_entry_price
-        position.mark_price = mark_price
+        position.cost = new_cost
         position.realized_pnl += realized_pnl
+        position.mark_price = mark_price
         position.timestamp = datetime.utcnow()
 
+        # Calculate entry_price from cost/quantity
+        if new_quantity != 0:
+            position.entry_price = new_cost / new_quantity
+        else:
+            position.entry_price = None
+
         # Calculate unrealized PnL
-        if position.quantity != 0 and position.entry_price:
-            position.unrealized_pnl = (mark_price - position.entry_price) * position.quantity
+        if new_quantity != 0 and position.entry_price:
+            position.unrealized_pnl = (mark_price - position.entry_price) * new_quantity
         else:
             position.unrealized_pnl = Decimal("0")
 

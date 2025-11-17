@@ -100,11 +100,21 @@ class Position(BaseModel):
 
     symbol: str = Field(..., description="Trading symbol")
     quantity: Decimal = Field(Decimal("0"), description="Position quantity (positive=long, negative=short)")
-    entry_price: Optional[Decimal] = Field(None, description="Average entry price")
+    cost: Decimal = Field(Decimal("0"), description="Total cost basis (signed: positive for long, negative for short)")
+    entry_price: Optional[Decimal] = Field(None, description="Average entry price (computed from cost/quantity)")
     mark_price: Optional[Decimal] = Field(None, description="Current mark price")
     unrealized_pnl: Decimal = Field(Decimal("0"), description="Unrealized PnL")
     realized_pnl: Decimal = Field(Decimal("0"), description="Realized PnL")
     timestamp: datetime = Field(default_factory=datetime.utcnow, description="Last update timestamp")
+
+    @property
+    def computed_entry_price(self) -> Optional[Decimal]:
+        """Calculate entry price from cost and quantity (use this instead of entry_price field)."""
+        if self.quantity == 0:
+            return None
+        if self.cost == 0:
+            return Decimal("0")
+        return self.cost / self.quantity
 
     @property
     def notional(self) -> Decimal:

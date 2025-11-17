@@ -95,6 +95,7 @@ async def run_paper_trading(settings: Settings):
 
         # Create market makers
         market_makers = []
+        risk_scaling_engines = {}
         for symbol in settings.symbols:
             if symbol not in orderbook_managers:
                 continue
@@ -107,6 +108,9 @@ async def run_paper_trading(settings: Settings):
                 orderbook_manager=orderbook_managers[symbol],
             )
             market_makers.append(mm)
+            # Collect risk scaling engines if available
+            if hasattr(mm, 'risk_scaling') and mm.risk_scaling:
+                risk_scaling_engines[symbol] = mm.risk_scaling
             console.print(f"[green]Market maker ready for {symbol}[/green]")
 
         if not market_makers:
@@ -192,6 +196,18 @@ async def run_paper_trading(settings: Settings):
             # Fallback to polling
             ws_client = None
 
+        # Start dashboard update task if dashboard is enabled
+        dashboard_update_task = None
+        try:
+            dashboard_update_task = asyncio.create_task(
+                _dashboard_update_loop(
+                    simulated_exchange, risk_guardian, settings, risk_scaling_engines
+                )
+            )
+            console.print("[dim]Dashboard updates enabled (if dashboard server is running)[/dim]")
+        except Exception as e:
+            logger.debug(f"Dashboard update task not started: {e}")
+        
         # Keep running
         last_status_print = datetime.utcnow()
         status_interval = timedelta(minutes=5)  # Print status every 5 minutes
@@ -289,6 +305,17 @@ async def run_paper_trading(settings: Settings):
         except KeyboardInterrupt:
             console.print("\n[yellow]Stopping paper trading...[/yellow]")
         finally:
+            # Stop dashboard update task if running
+            try:
+                if 'dashboard_update_task' in locals() and dashboard_update_task:
+                    dashboard_update_task.cancel()
+                    try:
+                        await dashboard_update_task
+                    except asyncio.CancelledError:
+                        pass
+            except Exception:
+                pass
+            
             # Stop all market makers
             for mm in market_makers:
                 try:
@@ -362,4 +389,27 @@ async def run_paper_trading(settings: Settings):
 
     finally:
         await public_client.close()
+
+
+async def _dashboard_update_loop(
+    exchange: SimulatedExchangeClient,
+    risk_guardian: RiskGuardian,
+    settings: Settings,
+    risk_scaling_engines: dict,
+    update_interval: float = 1.0,
+):
+    """Background task to update dashboard state periodically."""
+    from src.apps.dashboard import update_dashboard_state
+    
+    while True:
+        try:
+            await update_dashboard_state(
+                exchange=exchange,
+                risk_guardian=risk_guardian,
+                settings=settings,
+                risk_scaling_engines=risk_scaling_engines,
+            )
+        except Exception as e:
+            logger.debug(f"Error in dashboard update loop: {e}")
+        await asyncio.sleep(update_interval)
 

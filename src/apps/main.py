@@ -37,7 +37,7 @@ app = typer.Typer(help="Market Maker Bot CLI - run, monitor, and calibrate the m
 console = Console()
 
 
-@app.command(help="Run the market maker. Examples:\n  python -m src.apps.main run --mode paper_exchange --symbols BTCUSDT,ETHUSDT\n  python -m src.apps.main run -m backtest -s BTCUSDT --spread-bps 6 --order-notional-pct 0.01")
+@app.command(help="Run the market maker. Examples:\n  python -m src.apps.main run --mode paper_exchange --symbols BTCUSDT,ETHUSDT\n  python -m src.apps.main run -m backtest -s BTCUSDT --spread-bps 6 --order-notional-pct 0.01\n  python -m src.apps.main run -m backtest -s BTCUSDT --start-date 2024-01-01 --end-date 2024-01-07")
 def run(
     mode: str = typer.Option("paper_exchange", "--mode", "-m", help="Trading mode: live|paper_exchange|dry_run|backtest"),
     symbol: Optional[str] = typer.Option(None, "--symbol", "-s", help="Single trading symbol (e.g., BTCUSDT)"),
@@ -47,6 +47,8 @@ def run(
     refresh_ms: Optional[int] = typer.Option(None, "--refresh-ms", help="Override quote refresh interval (ms)"),
     bot_equity: Optional[float] = typer.Option(None, "--bot-equity", help="Override bot equity in USDT (e.g., 100)"),
     log_level: str = typer.Option("INFO", "--log-level", help="Log level: DEBUG|INFO|WARNING|ERROR"),
+    start_date: Optional[str] = typer.Option(None, "--start-date", help="Backtest start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = typer.Option(None, "--end-date", help="Backtest end date (YYYY-MM-DD)"),
 ):
     """Run the market maker bot."""
     # Set log level early
@@ -110,13 +112,32 @@ def run(
             engine = BacktestEngine(settings)
             symbol = settings.symbols[0] if settings.symbols else "BTCUSDT"
             
-            # Parse dates from config or use defaults
-            start_date = None
-            end_date = None
-            # TODO: Add date parsing from config or CLI args
+            # Parse dates from CLI args, config, or use None (load all data)
+            start_date_parsed = None
+            end_date_parsed = None
+            
+            if start_date_arg := (start_date or settings.backtest_start_date):
+                try:
+                    start_date_parsed = datetime.strptime(start_date_arg, "%Y-%m-%d")
+                except ValueError:
+                    console.print(f"[yellow]Invalid start date format: {start_date_arg}. Use YYYY-MM-DD[/yellow]")
+            
+            if end_date_arg := (end_date or settings.backtest_end_date):
+                try:
+                    end_date_parsed = datetime.strptime(end_date_arg, "%Y-%m-%d")
+                    # Add one day to include the full end date
+                    from datetime import timedelta
+                    end_date_parsed = end_date_parsed + timedelta(days=1)
+                except ValueError:
+                    console.print(f"[yellow]Invalid end date format: {end_date_arg}. Use YYYY-MM-DD[/yellow]")
+            
+            if start_date_parsed or end_date_parsed:
+                console.print(f"[dim]Date range: {start_date_parsed.date() if start_date_parsed else 'start'} to {end_date_parsed.date() if end_date_parsed else 'end'}[/dim]")
+            else:
+                console.print("[dim]No date range specified, loading all available data[/dim]")
             
             try:
-                results = asyncio.run(engine.run(symbol, start_date, end_date))
+                results = asyncio.run(engine.run(symbol, start_date_parsed, end_date_parsed))
                 
                 # Display results
                 results_table = Table(title="Backtest Results", show_header=True)
@@ -262,6 +283,61 @@ def sweep(
     except Exception as e:
         console.print(f"[red]Sweep error: {e}[/red]")
         logger.exception("Sweep error")
+        sys.exit(1)
+
+
+@app.command(help="Start web dashboard for monitoring bot performance.")
+def dashboard(
+    host: str = typer.Option("127.0.0.1", "--host", help="Dashboard server host"),
+    port: int = typer.Option(8000, "--port", help="Dashboard server port"),
+    mode: str = typer.Option("paper_exchange", "--mode", "-m", help="Trading mode (for data connection)"),
+):
+    """Start web dashboard server."""
+    console.print(Panel.fit("Starting Dashboard Server", style="bold blue"))
+    console.print(f"[cyan]Dashboard will be available at: http://{host}:{port}[/cyan]")
+    
+    try:
+        from src.apps.dashboard import run_dashboard_server
+        
+        # Load settings
+        settings = Settings.from_env()
+        
+        # Try to get exchange and risk guardian if bot is running
+        exchange = None
+        risk_guardian = None
+        risk_scaling_engines = None
+        
+        if mode == "paper_exchange":
+            try:
+                from src.execution.simulated_exchange import SimulatedExchangeClient
+                from src.risk.guardian import RiskGuardian
+                from decimal import Decimal
+                
+                exchange = SimulatedExchangeClient(
+                    initial_equity=Decimal(str(settings.bot_equity_usdt))
+                )
+                risk_guardian = RiskGuardian(
+                    settings.risk, Decimal(str(settings.bot_equity_usdt))
+                )
+                # Risk scaling engines would be passed from running market makers
+                # For now, we'll just start the dashboard
+            except Exception as e:
+                console.print(f"[yellow]Warning: Could not initialize exchange client: {e}[/yellow]")
+                console.print("[dim]Dashboard will start but may not have live data[/dim]")
+        
+        asyncio.run(run_dashboard_server(
+            host=host,
+            port=port,
+            exchange=exchange,
+            risk_guardian=risk_guardian,
+            settings=settings,
+            risk_scaling_engines=risk_scaling_engines,
+        ))
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Dashboard stopped by user[/yellow]")
+    except Exception as e:
+        console.print(f"[red]Dashboard error: {e}[/red]")
+        logger.exception("Dashboard error")
         sys.exit(1)
 
 async def _run_bot(settings: Settings, dry_run: bool = False):

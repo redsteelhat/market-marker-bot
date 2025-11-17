@@ -114,6 +114,9 @@ class OrderBookManager:
         """
         self.snapshot = snapshot
         self.last_update = snapshot.timestamp
+        # Track mid history
+        if self.snapshot and self.snapshot.mid_price:
+            self._recent_mid_prices.append(self.snapshot.mid_price)
 
     def get_best_bid(self) -> Optional[Decimal]:
         """Get best bid price.
